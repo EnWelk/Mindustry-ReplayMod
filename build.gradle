@@ -1,0 +1,57 @@
+plugins {
+    id 'java'
+}
+
+group = 'com.enwelk'
+version = '0.1'
+
+base {
+    archivesName = 'ReplayMod'
+}
+
+def mindustryDir = file(providers.gradleProperty('mindustryDir').get())
+def arcDir = file(providers.gradleProperty('arcDir').get())
+
+if (!mindustryDir.isDirectory()) {
+    throw new GradleException(
+        "Mindustry source directory not found: ${mindustryDir}"
+    )
+}
+
+if (!arcDir.isDirectory()) {
+    throw new GradleException(
+        "Arc source directory not found: ${arcDir}"
+    )
+}
+
+repositories {
+    mavenCentral()
+    maven { url = 'https://www.jitpack.io' }
+}
+
+dependencies {
+    def mindustryJar = new File(
+        mindustryDir, 'core/build/libs/core-release.jar'
+    )
+    def arcJar = new File(
+        arcDir, 'arc-core/build/libs/arc-core-1.0.jar'
+    )
+
+    if (mindustryJar.exists()) {
+        compileOnly files(mindustryJar)
+    }
+
+    if (arcJar.exists()) {
+        compileOnly files(arcJar)
+    }
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(17)
+    }
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+}

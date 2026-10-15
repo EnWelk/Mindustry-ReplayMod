@@ -1,0 +1,152 @@
+package com.enwelk.replaymod.rep;
+
+import java.io.ByteArrayOutputStream;
+import java.io.Closeable;
+import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.nio.channels.FileChannel;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
+import java.util.List;
+
+import arc.util.io.FastDeflaterOutputStream;
+import com.enwelk.replaymod.Action;
+import com.enwelk.replaymod.ReplayMod;
+
+import mindustry.Vars;
+import mindustry.io.SaveIO;
+import mindustry.io.SaveOptions;
+import mindustry.world.Tile;
+
+public class RepWriter implements Closeable {
+    public static final byte TICK_RECORD = 1;
+    public static final byte ACTION_RECORD = 2;
+    public static final byte END_RECORD = 3;
+
+    private final FileChannel channel;
+    private final ByteBuffer outputBuffer = ByteBuffer.allocate(64 * 1024);
+    private final ByteBuffer tickPayload = ByteBuffer.allocate(Long.BYTES + 4 * Float.BYTES + 2 + 4)
+        .order(ByteOrder.LITTLE_ENDIAN);
+    private boolean finished;
+
+    public RepWriter(Path filePath) throws IOException {
+        channel = FileChannel.open(filePath,
+            StandardOpenOption.WRITE,
+            StandardOpenOption.CREATE,
+            StandardOpenOption.TRUNCATE_EXISTING
+        );
+
+        try {
+            writeHeader();
+        } catch (IOException | RuntimeException e) {
+            try {
+                channel.close();
+            } catch (IOException closeError) {
+                e.addSuppressed(closeError);
+            }
+            throw e;
+        }
+    }
+
+    private void writeHeader() throws IOException {
+        ByteArrayOutputStream saveOutput = new ByteArrayOutputStream();
+        SaveOptions options = new SaveOptions();
+        options.extraTags = Vars.state.map.tags;
+        options.embedAssets = true;
+        SaveIO.write(new FastDeflaterOutputStream(saveOutput), options);
+        byte[] saveData = saveOutput.toByteArray();
+
+        ByteBuffer header = ByteBuffer.allocate(3 + Float.BYTES + Integer.BYTES)
+            .order(ByteOrder.LITTLE_ENDIAN);
+        header.put((byte)'R').put((byte)'E').put((byte)'P');
+        header.putFloat(ReplayMod.replayVersion());
+        header.putInt(saveData.length);
+        header.flip();
+
+        writeFully(header);
+        writeFully(ByteBuffer.wrap(saveData));
+    }
+
+    public void writeTickPacket(long tick, float movementX, float movementY,
+                                float aimX, float aimY, boolean shooting,
+                                boolean boosting, Tile mineTile) throws IOException {
+        ByteBuffer payload = tickPayload;
+        payload.clear();
+        payload.putLong(tick);
+        payload.putFloat(movementX).putFloat(movementY);
+        payload.putFloat(aimX).putFloat(aimY);
+        payload.put((byte)(shooting ? 1 : 0));
+        payload.put((byte)(boosting ? 1 : 0));
+        if (mineTile == null) {
+            payload.putShort((short)-1).putShort((short)-1);
+        } else {
+            payload.putShort((short)mineTile.x).putShort((short)mineTile.y);
+        }
+        payload.flip();
+        writeRecord(TICK_RECORD, payload);
+    }
+
+    public void writeActions(long tick, List<Action> actions) throws IOException {
+        if (actions.size() > Short.MAX_VALUE) {
+            throw new IllegalArgumentException("Too many actions in one replay record: " + actions.size());
+        }
+
+        int size = Long.BYTES + Short.BYTES;
+        for (Action action : actions) {
+            size = Math.addExact(size, action.getBufferSize());
+        }
+
+        ByteBuffer payload = ByteBuffer.allocate(size).order(ByteOrder.LITTLE_ENDIAN);
+        payload.putLong(tick);
+        payload.putShort((short)actions.size());
+        for (Action action : actions) {
+            action.write(payload);
+        }
+        payload.flip();
+        writeRecord(ACTION_RECORD, payload);
+    }
+
+    public void finish(long tick) throws IOException {
+        if (finished) return;
+        ByteBuffer payload = ByteBuffer.allocate(Long.BYTES).order(ByteOrder.LITTLE_ENDIAN);
+        payload.putLong(tick).flip();
+        writeRecord(END_RECORD, payload);
+        finished = true;
+    }
+
+    private void writeRecord(byte type, ByteBuffer payload) throws IOException {
+        ByteBuffer header = ByteBuffer.allocate(1 + Integer.BYTES).order(ByteOrder.LITTLE_ENDIAN);
+        header.put(type).putInt(payload.remaining()).flip();
+        writeFully(header);
+        writeFully(payload);
+    }
+
+    private void writeFully(ByteBuffer buffer) throws IOException {
+        while (buffer.hasRemaining()) {
+            if (!outputBuffer.hasRemaining()) flushBuffer();
+            int count = Math.min(buffer.remaining(), outputBuffer.remaining());
+            ByteBuffer slice = buffer.slice();
+            slice.limit(count);
+            outputBuffer.put(slice);
+            buffer.position(buffer.position() + count);
+        }
+    }
+
+    private void flushBuffer() throws IOException {
+        outputBuffer.flip();
+        while (outputBuffer.hasRemaining()) {
+            channel.write(outputBuffer);
+        }
+        outputBuffer.clear();
+    }
+
+    @Override
+    public void close() throws IOException {
+        try {
+            flushBuffer();
+        } finally {
+            channel.close();
+        }
+    }
+}
