@@ -2,7 +2,7 @@ name: ReplayMod
 displayName: ReplayMod
 author: EnWelk
 description: Record and replay your gameplay sessions in Mindustry.
-version: 0.1
+version: 0.0
 minGameVersion: 154
 java: true
 main: com.enwelk.replaymod.ReplayMod
