@@ -10,6 +10,7 @@ import arc.util.Log;
 import arc.util.serialization.Jval;
 import mindustry.Vars;
 import mindustry.game.EventType.DisposeEvent;
+import mindustry.game.EventType.WorldLoadEvent;
 import mindustry.mod.Mod;
 import mindustry.mod.Mods.LoadedMod;
 
@@ -19,6 +20,7 @@ public class ReplayMod extends Mod {
 
     private final ReplayController controller = new ReplayController();
     private final ReplayHud replayHud = new ReplayHud(this, controller);
+    private IntroDialog introDialog;
     static public float ofRight;
     static public float ofLeft;
     static public float ofTop;
@@ -28,12 +30,27 @@ public class ReplayMod extends Mod {
         loadMetadataSettings();
         loadConfiguration();
         replayHud.load();
+        Events.on(WorldLoadEvent.class, event -> showIntro());
         Events.on(DisposeEvent.class, event -> {
             if (!controller.isActive()) return;
             try {
                 controller.stop();
             } catch (IOException e) {
                 Log.err("Failed to finish replay while disposing the game", e);
+            }
+        });
+    }
+
+    /** Shows the welcome dialog once a world is ready. */
+    private void showIntro() {
+        if (IntroDialog.isDismissed()) return;
+        Core.app.post(() -> {
+            if (Core.scene == null || Vars.state == null || !Vars.state.isGame()) return;
+            if (introDialog == null) {
+                introDialog = new IntroDialog();
+            }
+            if (!introDialog.isShown()) {
+                introDialog.show();
             }
         });
     }

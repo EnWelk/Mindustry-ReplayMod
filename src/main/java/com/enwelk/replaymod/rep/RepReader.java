@@ -56,7 +56,8 @@ public class RepReader implements Closeable {
         }
 
         float fileVersion = header.getFloat();
-        if (Float.compare(fileVersion, ReplayMod.replayVersion()) != 0) {
+        if (Float.compare(fileVersion, ReplayMod.replayVersion()) != 0 &&
+            Float.compare(fileVersion, 1f) != 0) {
             throw new IOException("Unsupported replay version: " + fileVersion);
         }
 
@@ -124,7 +125,8 @@ public class RepReader implements Closeable {
     }
 
     private TickRecord readTick(ByteBuffer payload) throws IOException {
-        int expectedSize = Long.BYTES + 4 * Float.BYTES + 2 + 4;
+        boolean hasCamera = Float.compare(version, 1f) != 0;
+        int expectedSize = Long.BYTES + (hasCamera ? 7 : 4) * Float.BYTES + 2 + 4;
         if (payload.remaining() != expectedSize) {
             throw new IOException("Invalid tick record size: " + payload.remaining());
         }
@@ -134,8 +136,13 @@ public class RepReader implements Closeable {
         float movementY = payload.getFloat();
         float aimX = payload.getFloat();
         float aimY = payload.getFloat();
+        float cameraX = hasCamera ? payload.getFloat() : Float.NaN;
+        float cameraY = hasCamera ? payload.getFloat() : Float.NaN;
+        float cameraScale = hasCamera ? payload.getFloat() : Float.NaN;
         if (!Float.isFinite(movementX) || !Float.isFinite(movementY) ||
-            !Float.isFinite(aimX) || !Float.isFinite(aimY)) {
+            !Float.isFinite(aimX) || !Float.isFinite(aimY) ||
+            (hasCamera && (!Float.isFinite(cameraX) || !Float.isFinite(cameraY) ||
+                !Float.isFinite(cameraScale) || cameraScale <= 0f))) {
             throw new IOException("Invalid non-finite replay control value");
         }
         byte shooting = payload.get();
@@ -149,7 +156,8 @@ public class RepReader implements Closeable {
             throw new IOException("Invalid replay mining tile");
         }
         return new TickRecord(tick, movementX, movementY, aimX, aimY,
-            shooting == 1, boosting == 1, mineX, mineY);
+            shooting == 1, boosting == 1, mineX, mineY,
+            cameraX, cameraY, cameraScale);
     }
 
     private ActionRecord readActions(ByteBuffer payload) throws IOException {
@@ -205,7 +213,8 @@ public class RepReader implements Closeable {
     }
 
     public record TickRecord(long tick, float movementX, float movementY, float aimX, float aimY,
-                             boolean shooting, boolean boosting, short mineX, short mineY)
+                             boolean shooting, boolean boosting, short mineX, short mineY,
+                             float cameraX, float cameraY, float cameraScale)
         implements ReplayRecord {}
 
     public record ActionRecord(long tick, List<Action> actions) implements ReplayRecord {}

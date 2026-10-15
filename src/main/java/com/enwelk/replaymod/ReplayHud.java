@@ -24,7 +24,7 @@ public class ReplayHud {
             if (Vars.ui == null || Vars.ui.menufrag == null) return;
 
             dialog = new ReplayDialog(mod, controller);
-            Vars.ui.menufrag.addButton("@replaymod.open", Icon.play, dialog::show);
+            Vars.ui.menufrag.addButton("@replaymod.open", Icon.play, this::open);
 
             Table hudButton = new Table();
             TextButton button = hudButton.button("@replaymod.open", Icon.play, () -> {})
@@ -94,11 +94,16 @@ public class ReplayHud {
                         mod.saveButtonPosition(hudButton.x, hudButton.y);
                     } else if (x >= 0f && y >= 0f &&
                         x < button.getWidth() && y < button.getHeight()) {
-                        dialog.show();
+                        open();
                     }
                     activePointer = -1;
                 }
             });
         });
+    }
+
+    /** Opens replay controls; the replay input handler remains active underneath. */
+    private void open() {
+        dialog.show();
     }
 }

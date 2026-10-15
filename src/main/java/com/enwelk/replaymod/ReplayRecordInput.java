@@ -3,6 +3,7 @@ package com.enwelk.replaymod;
 import java.io.ByteArrayOutputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -11,6 +12,7 @@ import arc.func.Cons;
 import arc.math.geom.Vec2;
 import arc.util.Log;
 import arc.util.io.Writes;
+import arc.util.serialization.Jval;
 import mindustry.Vars;
 import mindustry.game.EventType.BuildRotateEvent;
 import mindustry.game.EventType.BuildSelectEvent;
@@ -35,6 +37,7 @@ public class ReplayRecordInput extends DesktopInput implements AutoCloseable {
     private final Vec2 lastMovement = new Vec2();
     private final List<Action> pendingActions = new ArrayList<>();
     private float lastAimX, lastAimY;
+    private float lastCameraX, lastCameraY, lastCameraScale;
     private boolean lastShooting, lastBoosting, lastBuilding;
     private boolean hasRecordedInput;
     private long lastInputTick = Long.MIN_VALUE;
@@ -129,11 +132,17 @@ public class ReplayRecordInput extends DesktopInput implements AutoCloseable {
         }
 
         Tile mineTile = unit.mineTile;
+        float cameraX = arc.Core.camera.position.x;
+        float cameraY = arc.Core.camera.position.y;
+        float cameraScale = Vars.renderer.getScale();
         long tick = (long)Math.floor(Vars.state.tick);
         if (tick != lastInputTick && (!hasRecordedInput ||
             !movement.epsilonEquals(lastMovement, 0.001f) ||
             Math.abs(unit.aimX() - lastAimX) > 0.1f ||
             Math.abs(unit.aimY() - lastAimY) > 0.1f ||
+            Math.abs(cameraX - lastCameraX) > 0.1f ||
+            Math.abs(cameraY - lastCameraY) > 0.1f ||
+            Math.abs(cameraScale - lastCameraScale) > 0.001f ||
             player.shooting != lastShooting ||
             player.boosting != lastBoosting ||
             mineTile != lastMineTile)) {
@@ -145,7 +154,8 @@ public class ReplayRecordInput extends DesktopInput implements AutoCloseable {
                     unit.aimX(), unit.aimY(),
                     player.shooting,
                     player.boosting,
-                    mineTile
+                    mineTile,
+                    cameraX, cameraY, cameraScale
                 );
             } catch (IOException e) {
                 Log.err("Failed to write tick packet to replay", e);
@@ -154,6 +164,9 @@ public class ReplayRecordInput extends DesktopInput implements AutoCloseable {
             lastMovement.set(movement);
             lastAimX = unit.aimX();
             lastAimY = unit.aimY();
+            lastCameraX = cameraX;
+            lastCameraY = cameraY;
+            lastCameraScale = cameraScale;
             lastShooting = player.shooting;
             lastBoosting = player.boosting;
             lastMineTile = mineTile;
@@ -299,6 +312,16 @@ public class ReplayRecordInput extends DesktopInput implements AutoCloseable {
             } else if (action instanceof Action.BuildPlan plan) {
                 plan.configType = 3;
                 plan.configItemId = item.id;
+            }
+            return true;
+        } else if (value instanceof Jval json) {
+            byte[] data = json.toString().getBytes(StandardCharsets.UTF_8);
+            if (action instanceof Action.Config configAction) {
+                configAction.configType = 5;
+                configAction.configData = data;
+            } else if (action instanceof Action.BuildPlan plan) {
+                plan.configType = 5;
+                plan.configData = data;
             }
             return true;
         } else {

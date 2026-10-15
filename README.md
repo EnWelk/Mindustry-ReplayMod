@@ -1,8 +1,10 @@
-TODO:
-1. Fix don't working camera
-2. Normal work while multiplayer
-3. Normal work json mods and mods that uses simple game logic
-4. Update UI
+# ReplayMod
+Utility mod for recording and replaying Mindustry games.
 
-It's a utility mod for another project of mine.
-Honestly, I don't really know what else to write here. It's just a simple mod, similar to Minecraft's Replay Mod.
+TODO:
+- Fix some bag in map after replay
+- Lock UI button "Next wawe"
+- Add screen when replay ends
+- Auto replay name
+- New UI
+- Record and replay complete multiplayer sessions, including actions from every player and server-authoritative world changes.

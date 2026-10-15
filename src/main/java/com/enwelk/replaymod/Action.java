@@ -65,12 +65,15 @@ public abstract class Action {
             case 2: return 4;
             case 3: return 2;
             case 4: return 0;
+            case 5: return 0;
             default: throw new IllegalArgumentException("Unknown config type: " + type);
         }
     }
 
     protected static int configSize(byte type, byte[] data) {
-        return type == 4 ? Integer.BYTES + (data == null ? 0 : data.length) : configSize(type);
+        return type == 4 || type == 5
+            ? Integer.BYTES + (data == null ? 0 : data.length)
+            : configSize(type);
     }
 
     protected static void writeConfig(ByteBuffer buffer, byte type, int integer, short x, short y, short itemId, byte[] data) {
@@ -80,6 +83,7 @@ public abstract class Action {
             case 2: buffer.putShort(x); buffer.putShort(y); break;
             case 3: buffer.putShort(itemId); break;
             case 4:
+            case 5:
                 if (data == null) {
                     throw new IllegalArgumentException("Missing serialized config data");
                 }
@@ -100,6 +104,7 @@ public abstract class Action {
                 case 2: a.configShortX = buffer.getShort(); a.configShortY = buffer.getShort(); break;
                 case 3: a.configItemId = buffer.getShort(); break;
                 case 4: a.configData = readConfigData(buffer); break;
+                case 5: a.configData = readConfigData(buffer); break;
                 default: throw new IllegalArgumentException("Unknown config type: " + a.configType);
             }
         } else if (action instanceof Config) {
@@ -110,6 +115,7 @@ public abstract class Action {
                 case 2: a.configShortX = buffer.getShort(); a.configShortY = buffer.getShort(); break;
                 case 3: a.configItemId = buffer.getShort(); break;
                 case 4: a.configData = readConfigData(buffer); break;
+                case 5: a.configData = readConfigData(buffer); break;
                 default: throw new IllegalArgumentException("Unknown config type: " + a.configType);
             }
         }

@@ -26,7 +26,7 @@ public class RepWriter implements Closeable {
 
     private final FileChannel channel;
     private final ByteBuffer outputBuffer = ByteBuffer.allocate(64 * 1024);
-    private final ByteBuffer tickPayload = ByteBuffer.allocate(Long.BYTES + 4 * Float.BYTES + 2 + 4)
+    private final ByteBuffer tickPayload = ByteBuffer.allocate(Long.BYTES + 7 * Float.BYTES + 2 + 4)
         .order(ByteOrder.LITTLE_ENDIAN);
     private boolean finished;
 
@@ -70,12 +70,14 @@ public class RepWriter implements Closeable {
 
     public void writeTickPacket(long tick, float movementX, float movementY,
                                 float aimX, float aimY, boolean shooting,
-                                boolean boosting, Tile mineTile) throws IOException {
+                                boolean boosting, Tile mineTile,
+                                float cameraX, float cameraY, float cameraScale) throws IOException {
         ByteBuffer payload = tickPayload;
         payload.clear();
         payload.putLong(tick);
         payload.putFloat(movementX).putFloat(movementY);
         payload.putFloat(aimX).putFloat(aimY);
+        payload.putFloat(cameraX).putFloat(cameraY).putFloat(cameraScale);
         payload.put((byte)(shooting ? 1 : 0));
         payload.put((byte)(boosting ? 1 : 0));
         if (mineTile == null) {

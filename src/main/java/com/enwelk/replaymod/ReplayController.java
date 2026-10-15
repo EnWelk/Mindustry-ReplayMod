@@ -3,11 +3,13 @@ package com.enwelk.replaymod;
 import java.io.ByteArrayInputStream;
 import java.io.DataInputStream;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 
 import arc.util.Log;
 import arc.math.geom.Vec2;
 import arc.util.io.Reads;
+import arc.util.serialization.Jval;
 import mindustry.Vars;
 import mindustry.core.GameState;
 import mindustry.entities.units.BuildPlan;
@@ -31,12 +33,17 @@ public class ReplayController {
     private RepWriter writer;
     private ReplayRecordInput recordingInput;
     private RepReader reader;
-    private PlaybackInput playbackInput;
+    private Viewer playbackInput;
     private RepReader.ReplayRecord nextRecord;
     private RepReader.TickRecord lastTick;
+    private long currentTick;
+    private boolean playbackPaused;
 
     public void startRecording(Path path) throws IOException {
         ensureIdle();
+        if (Vars.net.active()) {
+            throw new IllegalStateException("Full multiplayer replay recording is not supported yet");
+        }
         if (Vars.control == null || Vars.player == null || Vars.state == null || !Vars.state.isGame()) {
             throw new IllegalStateException("Recording can only start during a game");
         }
@@ -76,8 +83,29 @@ public class ReplayController {
         return reader != null;
     }
 
+    public long currentTick() {
+        return currentTick;
+    }
+
+    public boolean isPlaybackPaused() {
+        return playbackPaused;
+    }
+
+    /** Pauses or resumes replay simulation. */
+    public void setPlaybackPaused(boolean paused) {
+        if (reader == null) return;
+        playbackPaused = paused;
+        if (Vars.state != null && Vars.state.isGame()) {
+            Vars.state.set(paused ? GameState.State.paused : GameState.State.playing);
+        }
+    }
+
+    /** Starts playback and replaces the active game input handler. */
     public void startPlayback(Path path) throws IOException {
         ensureIdle();
+        if (Vars.net.active()) {
+            throw new IllegalStateException("Replay playback is only supported offline");
+        }
         if (Vars.control == null || Vars.player == null) {
             throw new IllegalStateException("Replay playback requires a loaded client");
         }
@@ -87,9 +115,11 @@ public class ReplayController {
         try {
             previousInput = input;
             reader = newReader;
-            playbackInput = new PlaybackInput();
+            playbackInput = new Viewer(this);
             nextRecord = reader.readNext();
             lastTick = null;
+            currentTick = 0L;
+            playbackPaused = false;
             Vars.control.setInput(playbackInput);
             Vars.state.set(GameState.State.playing);
         } catch (IOException | RuntimeException e) {
@@ -104,6 +134,7 @@ public class ReplayController {
             playbackInput = null;
             nextRecord = null;
             lastTick = null;
+            playbackPaused = false;
             previousInput = null;
             try {
                 newReader.close();
@@ -156,10 +187,12 @@ public class ReplayController {
         throw new IllegalStateException("No replay recording or playback is active");
     }
 
-    private void updatePlayback() {
+    /** Advances replay records and applies the latest recorded player state. */
+    void updatePlayback() {
         if (reader == null || Vars.state == null || Vars.player == null) return;
 
         long currentTick = (long)Math.floor(Vars.state.tick);
+        this.currentTick = currentTick;
         boolean finished = false;
         try {
             while (nextRecord != null && nextRecord.tick() <= currentTick) {
@@ -311,8 +344,14 @@ public class ReplayController {
             case 2 -> new arc.math.geom.Point2(x, y);
             case 3 -> Vars.content.item(itemId);
             case 4 -> readSerializedConfig(data);
+            case 5 -> readJsonConfig(data);
             default -> throw new IllegalArgumentException("Unknown replay config type: " + type);
         };
+    }
+
+    private Jval readJsonConfig(byte[] data) {
+        if (data == null) throw new IllegalArgumentException("Missing JSON replay config");
+        return Jval.read(new String(data, StandardCharsets.UTF_8));
     }
 
     private Object readSerializedConfig(byte[] data) {
@@ -330,11 +369,13 @@ public class ReplayController {
 
     private void stopPlayback() throws IOException {
         RepReader oldReader = reader;
-        PlaybackInput oldInput = playbackInput;
+        Viewer oldInput = playbackInput;
+        boolean wasPaused = playbackPaused;
         reader = null;
         playbackInput = null;
         nextRecord = null;
         lastTick = null;
+        playbackPaused = false;
         try {
             if (Vars.player != null) {
                 Vars.player.shooting = false;
@@ -342,6 +383,9 @@ public class ReplayController {
                 if (Vars.player.unit() != null) {
                     Vars.player.unit().controlWeapons(false, false);
                 }
+            }
+            if (wasPaused && Vars.state != null && Vars.state.isPaused()) {
+                Vars.state.set(GameState.State.playing);
             }
             if (Vars.control != null && Vars.control.input == oldInput && previousInput != null) {
                 Vars.control.setInput(previousInput);
@@ -358,50 +402,4 @@ public class ReplayController {
         }
     }
 
-    private class PlaybackInput extends DesktopInput {
-        @Override
-        public void update() {
-            updatePlayback();
-        }
-
-        @Override
-        public boolean keyDown(arc.input.KeyCode keycode) {
-            return true;
-        }
-
-        @Override
-        public boolean keyUp(arc.input.KeyCode keycode) {
-            return true;
-        }
-
-        @Override
-        public boolean keyTyped(char character) {
-            return true;
-        }
-
-        @Override
-        public boolean touchDown(int screenX, int screenY, int pointer, arc.input.KeyCode button) {
-            return true;
-        }
-
-        @Override
-        public boolean touchUp(int screenX, int screenY, int pointer, arc.input.KeyCode button) {
-            return true;
-        }
-
-        @Override
-        public boolean touchDragged(int screenX, int screenY, int pointer) {
-            return true;
-        }
-
-        @Override
-        public boolean mouseMoved(int screenX, int screenY) {
-            return true;
-        }
-
-        @Override
-        public boolean scrolled(float amountX, float amountY) {
-            return true;
-        }
-    }
 }
