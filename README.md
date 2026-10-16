@@ -11,6 +11,9 @@ TODO:
 - Record and replay complete multiplayer sessions, including actions from every player and server-authoritative world changes.
 
 Change log:
+  - v0.3.3
+    - Added test
+    - Fix timeline
   - v0.3.2
     - Fix timeline
     - Fix +10 seconds button

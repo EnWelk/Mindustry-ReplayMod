@@ -2,7 +2,7 @@ name: ReplayMod
 displayName: ReplayMod
 author: EnWelk
 description: Record and replay your gameplay sessions in Mindustry. Telegram: @EnWelk
-version: 0.3.2
+version: 0.3.3
 minGameVersion: 154
 java: true
 main: com.enwelk.replaymod.ReplayMod

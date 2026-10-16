@@ -32,6 +32,7 @@ public class RepWriter implements Closeable {
         .order(ByteOrder.LITTLE_ENDIAN);
     private boolean finished;
 
+    /** Creates a replay file and writes its save and metadata header. */
     public RepWriter(Path filePath) throws IOException {
         channel = FileChannel.open(filePath,
             StandardOpenOption.WRITE,
@@ -51,6 +52,7 @@ public class RepWriter implements Closeable {
         }
     }
 
+    /** Captures and writes the embedded save and replay format header. */
     private void writeHeader() throws IOException {
         ByteArrayOutputStream saveOutput = new ByteArrayOutputStream();
         SaveOptions options = new SaveOptions();
@@ -71,6 +73,7 @@ public class RepWriter implements Closeable {
         writeModMetadata();
     }
 
+    /** Writes the enabled mod names and versions into the replay header. */
     private void writeModMetadata() throws IOException {
         List<String> mods = new ArrayList<>();
         Vars.mods.list().each(mod -> {
@@ -105,6 +108,7 @@ public class RepWriter implements Closeable {
         writeFully(metadata);
     }
 
+    /** Writes one recorded player-state packet. */
     public void writeTickPacket(long tick, float movementX, float movementY,
                                 float aimX, float aimY, boolean shooting,
                                 boolean boosting, Tile mineTile,
@@ -126,6 +130,7 @@ public class RepWriter implements Closeable {
         writeRecord(TICK_RECORD, payload);
     }
 
+    /** Writes one packet containing the recorded actions for a tick. */
     public void writeActions(long tick, List<Action> actions) throws IOException {
         if (actions.size() > Short.MAX_VALUE) {
             throw new IllegalArgumentException("Too many actions in one replay record: " + actions.size());
@@ -146,6 +151,7 @@ public class RepWriter implements Closeable {
         writeRecord(ACTION_RECORD, payload);
     }
 
+    /** Writes the terminal record once to mark the replay's last tick. */
     public void finish(long tick) throws IOException {
         if (finished) return;
         ByteBuffer payload = ByteBuffer.allocate(Long.BYTES).order(ByteOrder.LITTLE_ENDIAN);
@@ -154,6 +160,7 @@ public class RepWriter implements Closeable {
         finished = true;
     }
 
+    /** Writes a typed record header and its payload. */
     private void writeRecord(byte type, ByteBuffer payload) throws IOException {
         ByteBuffer header = ByteBuffer.allocate(1 + Integer.BYTES).order(ByteOrder.LITTLE_ENDIAN);
         header.put(type).putInt(payload.remaining()).flip();
@@ -161,6 +168,7 @@ public class RepWriter implements Closeable {
         writeFully(payload);
     }
 
+    /** Copies a buffer into the writer's output buffer. */
     private void writeFully(ByteBuffer buffer) throws IOException {
         while (buffer.hasRemaining()) {
             if (!outputBuffer.hasRemaining()) flushBuffer();
@@ -172,6 +180,7 @@ public class RepWriter implements Closeable {
         }
     }
 
+    /** Flushes buffered replay bytes to disk. */
     private void flushBuffer() throws IOException {
         outputBuffer.flip();
         while (outputBuffer.hasRemaining()) {
@@ -181,6 +190,7 @@ public class RepWriter implements Closeable {
     }
 
     @Override
+    /** Flushes pending bytes and closes the replay file. */
     public void close() throws IOException {
         try {
             flushBuffer();

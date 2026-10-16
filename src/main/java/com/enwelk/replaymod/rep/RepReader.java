@@ -35,6 +35,7 @@ public class RepReader implements Closeable {
     private long firstTick = Long.MAX_VALUE;
     private long endTick;
 
+    /** Opens a replay and reads its header and embedded map. */
     public RepReader(Path filePath) throws IOException {
         this.filePath = filePath;
         channel = FileChannel.open(filePath, StandardOpenOption.READ);
@@ -51,10 +52,12 @@ public class RepReader implements Closeable {
         }
     }
 
+    /** Returns the replay file format version. */
     public float version() {
         return version;
     }
 
+    /** Returns mods recorded in the replay header. */
     public List<String> usedMods() {
         return usedMods;
     }
@@ -159,6 +162,7 @@ public class RepReader implements Closeable {
         inputBuffer.limit(0);
     }
 
+    /** Reads and validates the file header, map, and optional mod metadata. */
     private float readHeader() throws IOException {
         ByteBuffer header = ByteBuffer.allocate(3 + Float.BYTES + Integer.BYTES)
             .order(ByteOrder.LITTLE_ENDIAN);
@@ -201,6 +205,7 @@ public class RepReader implements Closeable {
         return fileVersion;
     }
 
+    /** Reads mod metadata from this reader's current channel position. */
     private List<String> readModMetadata() throws IOException {
         ByteBuffer metadataHeader = ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN);
         readFully(metadataHeader, false);
@@ -212,12 +217,14 @@ public class RepReader implements Closeable {
         return readModNames(metadataHeader.getInt(), this::readMetadataBytes);
     }
 
+    /** Reads a fixed number of metadata bytes from this replay. */
     private byte[] readMetadataBytes(int size) throws IOException {
         ByteBuffer data = ByteBuffer.allocate(size);
         readFully(data, false);
         return data.array();
     }
 
+    /** Reads mod metadata from a channel without creating a replay reader. */
     private static List<String> readModMetadata(FileChannel file) throws IOException {
         ByteBuffer metadataHeader = ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN);
         readChannelFully(file, metadataHeader);
@@ -233,6 +240,7 @@ public class RepReader implements Closeable {
         });
     }
 
+    /** Decodes and validates the names in a replay's mod list. */
     private static List<String> readModNames(int count, MetadataReader reader) throws IOException {
         if (count < 0 || count > MAX_MOD_COUNT) {
             throw new IOException("Invalid replay mod count: " + count);
@@ -256,12 +264,14 @@ public class RepReader implements Closeable {
         return List.copyOf(mods);
     }
 
+    /** Checks whether a replay format version is supported. */
     private static boolean isSupportedVersion(float version) {
         return Float.compare(version, ReplayMod.replayVersion()) == 0 ||
             Float.compare(version, 1f) == 0 ||
             Float.compare(version, 2f) == 0;
     }
 
+    /** Fills a buffer from a file channel or reports truncation. */
     private static void readChannelFully(FileChannel channel, ByteBuffer buffer) throws IOException {
         while (buffer.hasRemaining()) {
             if (channel.read(buffer) < 0) throw new IOException("Replay file is truncated");
@@ -269,13 +279,16 @@ public class RepReader implements Closeable {
     }
 
     private interface MetadataReader {
+        /** Reads exactly the requested number of metadata bytes. */
         byte[] readBytes(int size) throws IOException;
 
+        /** Copies the requested metadata bytes into a buffer. */
         default void readFully(ByteBuffer buffer) throws IOException {
             buffer.put(readBytes(buffer.remaining()));
         }
     }
 
+    /** Checks whether the embedded save uses Mindustry's uncompressed header. */
     private boolean isUncompressedSave(byte[] data) {
         return data.length >= SaveIO.header.length &&
             data[0] == SaveIO.header[0] &&
@@ -284,6 +297,7 @@ public class RepReader implements Closeable {
             data[3] == SaveIO.header[3];
     }
 
+    /** Reads and decodes the next replay record, or returns null at clean EOF. */
     public ReplayRecord readNext() throws IOException {
         ByteBuffer recordHeader = ByteBuffer.allocate(1 + Integer.BYTES).order(ByteOrder.LITTLE_ENDIAN);
         if (!readFully(recordHeader, true)) {
@@ -316,6 +330,7 @@ public class RepReader implements Closeable {
         }
     }
 
+    /** Decodes one player-state record. */
     private TickRecord readTick(ByteBuffer payload) throws IOException {
         boolean hasCamera = Float.compare(version, 1f) != 0;
         int expectedSize = Long.BYTES + (hasCamera ? 7 : 4) * Float.BYTES + 2 + 4;
@@ -352,6 +367,7 @@ public class RepReader implements Closeable {
             cameraX, cameraY, cameraScale);
     }
 
+    /** Decodes one action record and its serialized actions. */
     private ActionRecord readActions(ByteBuffer payload) throws IOException {
         if (payload.remaining() < Long.BYTES + Short.BYTES) {
             throw new IOException("Truncated action record");
@@ -371,6 +387,7 @@ public class RepReader implements Closeable {
         return new ActionRecord(tick, List.copyOf(actions));
     }
 
+    /** Reads the requested bytes, optionally accepting a clean end of file. */
     private boolean readFully(ByteBuffer buffer, boolean allowCleanEof) throws IOException {
         boolean readAny = false;
         while (buffer.hasRemaining()) {
@@ -396,6 +413,7 @@ public class RepReader implements Closeable {
     }
 
     @Override
+    /** Closes the replay file channel. */
     public void close() throws IOException {
         channel.close();
     }

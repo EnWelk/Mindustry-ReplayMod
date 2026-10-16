@@ -20,6 +20,7 @@ public final class ReplayExporter {
     private static final int ENTRY_CHUNK_BYTES = 512 * 1024 * 1024;
     private static final int BUFFER_SIZE = 64 * 1024;
 
+    /** Prevents creating exporter instances. */
     private ReplayExporter() {}
 
     /** Copies one replay, optionally wrapping it in a ZIP archive. */
@@ -128,6 +129,7 @@ public final class ReplayExporter {
         private long reservedBytes;
         private int index;
 
+        /** Creates a writer that stages ZIP volumes in the given directory. */
         private VolumeWriter(Path staging) {
             this.staging = staging;
         }
@@ -165,6 +167,7 @@ public final class ReplayExporter {
         }
 
         @Override
+        /** Closes the currently open ZIP volume. */
         public void close() throws IOException {
             closeVolume();
         }

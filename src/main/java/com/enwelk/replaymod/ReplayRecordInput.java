@@ -53,18 +53,21 @@ public class ReplayRecordInput extends DesktopInput implements AutoCloseable {
     private final Cons<PickupEvent> pickupListener = this::recordPickup;
     private final Cons<PayloadDropEvent> dropListener = this::recordDrop;
 
+    /** Creates an input handler that records gameplay events to a replay. */
     public ReplayRecordInput(RepWriter writer) {
         this.writer = writer;
         registerEventListeners();
     }
 
     @Override
+    /** Records movement after the base handler updates the controlled unit. */
     protected void updateMovement(mindustry.gen.Unit unit) {
         super.updateMovement(unit);
         recordMovementIfChanged(unit);
     }
 
     @Override
+    /** Records per-tick input and flushes queued gameplay actions. */
     public void update() {
         long tick = (long)Math.floor(Vars.state.tick);
         if (!pendingActions.isEmpty() && pendingActionTick < tick) {
@@ -91,6 +94,7 @@ public class ReplayRecordInput extends DesktopInput implements AutoCloseable {
     }
 
     @Override
+    /** Records unit commands issued through the command interface. */
     public void commandTap(float screenX, float screenY, boolean queue) {
         if (!commandMode || selectedUnits.isEmpty() || Vars.player == null) {
             super.commandTap(screenX, screenY, queue);
@@ -125,6 +129,7 @@ public class ReplayRecordInput extends DesktopInput implements AutoCloseable {
         record(action);
     }
 
+    /** Writes a new tick packet when tracked player state has changed. */
     private void recordMovementIfChanged(mindustry.gen.Unit unit) {
         var player = Vars.player;
         if (unit == null || writer == null || player == null) {
@@ -175,6 +180,7 @@ public class ReplayRecordInput extends DesktopInput implements AutoCloseable {
         }
     }
 
+    /** Registers listeners for gameplay events that need replay records. */
     private void registerEventListeners() {
         Events.on(BuildSelectEvent.class, buildListener);
         Events.on(ConfigEvent.class, configListener);
@@ -185,6 +191,7 @@ public class ReplayRecordInput extends DesktopInput implements AutoCloseable {
         Events.on(PayloadDropEvent.class, dropListener);
     }
 
+    /** Records a local player's build or break plan. */
     private void recordBuild(BuildSelectEvent event) {
         if (event.tile == null || event.builder == null || !isLocalUnit(event.builder)) return;
 
@@ -211,6 +218,7 @@ public class ReplayRecordInput extends DesktopInput implements AutoCloseable {
         }
     }
 
+    /** Records a local player's building configuration change. */
     private void recordConfig(ConfigEvent event) {
         var player = event.player;
         if (event.tile == null || player == null || !player.isLocal()) return;
@@ -220,6 +228,7 @@ public class ReplayRecordInput extends DesktopInput implements AutoCloseable {
         if (setConfig(action, event.value)) record(action);
     }
 
+    /** Records entering or leaving direct unit control. */
     private void recordUnitControl(UnitControlEvent event) {
         var player = event.player;
         if (player == null || !player.isLocal()) return;
@@ -233,6 +242,7 @@ public class ReplayRecordInput extends DesktopInput implements AutoCloseable {
         }
     }
 
+    /** Records a local player's building rotation. */
     private void recordRotation(BuildRotateEvent event) {
         if (event.unit == null || !isLocalUnit(event.unit)) return;
 
@@ -242,6 +252,7 @@ public class ReplayRecordInput extends DesktopInput implements AutoCloseable {
         record(action);
     }
 
+    /** Records a local player's tile tap. */
     private void recordTap(TapEvent event) {
         if (event.player == null || !event.player.isLocal() || event.tile == null) return;
 
@@ -251,6 +262,7 @@ public class ReplayRecordInput extends DesktopInput implements AutoCloseable {
         record(action);
     }
 
+    /** Records a payload pickup made by the local player. */
     private void recordPickup(PickupEvent event) {
         var player = Vars.player;
         if (player == null || player.unit() != event.carrier) return;
@@ -258,6 +270,7 @@ public class ReplayRecordInput extends DesktopInput implements AutoCloseable {
         if (action != null) record(action);
     }
 
+    /** Records a payload drop made by the local player. */
     private void recordDrop(PayloadDropEvent event) {
         var player = Vars.player;
         if (player == null || player.unit() != event.carrier) return;
@@ -265,6 +278,7 @@ public class ReplayRecordInput extends DesktopInput implements AutoCloseable {
         if (action != null) record(action);
     }
 
+    /** Creates a replay action describing a payload interaction. */
     private Action.PayloadAction payloadAction(byte actionType, mindustry.gen.Unit unit, mindustry.gen.Building build, float x, float y) {
         if (unit == null && build == null) return null;
 
@@ -282,6 +296,7 @@ public class ReplayRecordInput extends DesktopInput implements AutoCloseable {
         return action;
     }
 
+    /** Encodes a supported building config value into an action. */
     private boolean setConfig(Action action, Object value) {
         if (value == null) return true;
 
@@ -347,6 +362,7 @@ public class ReplayRecordInput extends DesktopInput implements AutoCloseable {
         }
     }
 
+    /** Queues an action with the current simulation tick. */
     private void record(Action action) {
         long tick = (long)Math.floor(Vars.state.tick);
         if (!pendingActions.isEmpty() && tick != pendingActionTick) {
@@ -358,6 +374,7 @@ public class ReplayRecordInput extends DesktopInput implements AutoCloseable {
         pendingActions.add(action);
     }
 
+    /** Writes queued actions when their associated tick is complete. */
     private void flushActions() {
         if (pendingActions.isEmpty()) return;
         try {
@@ -370,11 +387,13 @@ public class ReplayRecordInput extends DesktopInput implements AutoCloseable {
         }
     }
 
+    /** Returns whether the unit is controlled by the local player. */
     private boolean isLocalUnit(mindustry.gen.Unit unit) {
         var player = Vars.player;
         return player != null && player.unit() == unit;
     }
 
+    /** Unregisters event listeners and closes the underlying writer. */
     @Override
     public void close() {
         flushActions();

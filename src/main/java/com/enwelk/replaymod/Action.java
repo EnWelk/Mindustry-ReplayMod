@@ -3,26 +3,36 @@ package com.enwelk.replaymod;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 
+/** Stores one recorded player action in its compact replay format. */
 public abstract class Action {
     public final byte actionType;
 
+    /** Creates an action with its serialized type identifier. */
     protected Action(byte actionType) {
         this.actionType = actionType;
     }
 
+    /** Returns the number of bytes in this action's payload. */
     protected abstract int dataSize();
+
+    /** Writes this action's payload to a little-endian buffer. */
     protected abstract void writeData(ByteBuffer buffer);
+
+    /** Reads this action's payload from a little-endian buffer. */
     protected abstract void readData(ByteBuffer buffer);
 
+    /** Returns the full serialized size, including the type byte. */
     public final int getBufferSize() {
         return 1 + dataSize();
     }
 
+    /** Writes the type and payload to the target buffer. */
     public final void write(ByteBuffer buffer) {
         buffer.put(actionType);
         writeData(buffer);
     }
 
+    /** Reads and constructs one action from its type byte and payload. */
     public static Action read(ByteBuffer buffer) {
         byte type = buffer.get();
 
@@ -47,6 +57,7 @@ public abstract class Action {
         return action;
     }
 
+    /** Serializes an action into a flipped little-endian buffer. */
     public static ByteBuffer createAction(Action a) {
         ByteBuffer buffer = ByteBuffer
             .allocate(a.getBufferSize())
@@ -58,6 +69,7 @@ public abstract class Action {
         return buffer;
     }
 
+    /** Returns the fixed payload size for a primitive config type. */
     protected static int configSize(byte type) {
         switch (type) {
             case 0: return 0;
@@ -70,12 +82,14 @@ public abstract class Action {
         }
     }
 
+    /** Returns the payload size for primitive or serialized config data. */
     protected static int configSize(byte type, byte[] data) {
         return type == 4 || type == 5
             ? Integer.BYTES + (data == null ? 0 : data.length)
             : configSize(type);
     }
 
+    /** Writes a typed config value in the replay format. */
     protected static void writeConfig(ByteBuffer buffer, byte type, int integer, short x, short y, short itemId, byte[] data) {
         switch (type) {
             case 0: break;
@@ -95,6 +109,7 @@ public abstract class Action {
         }
     }
 
+    /** Reads a typed config value into its action fields. */
     protected static void readConfig(ByteBuffer buffer, Action action) {
         if (action instanceof BuildPlan) {
             BuildPlan a = (BuildPlan) action;
@@ -121,6 +136,7 @@ public abstract class Action {
         }
     }
 
+    /** Reads length-prefixed serialized config bytes. */
     private static byte[] readConfigData(ByteBuffer buffer) {
         int length = buffer.getInt();
         if (length < 0 || length > buffer.remaining()) {
@@ -131,6 +147,7 @@ public abstract class Action {
         return data;
     }
 
+    /** Writes config fields from a build-plan or config action. */
     protected static void writeConfig(ByteBuffer buffer, Action action) {
         if (action instanceof BuildPlan) {
             BuildPlan a = (BuildPlan) action;
@@ -143,6 +160,7 @@ public abstract class Action {
 
     // BuildPlan (id=1): x(short), y(short), rotation(byte), blockId(short), configType(byte), [config]
     // configType 4 stores a TypeIO-serialized value preceded by its byte length.
+    /** Records adding or removing a planned block. */
     public static class BuildPlan extends Action {
         public short x, y, blockId;
         public byte rotation, configType;
@@ -150,16 +168,19 @@ public abstract class Action {
         public short configShortX, configShortY, configItemId;
         public byte[] configData;
 
+        /** Creates a build-plan action. */
         public BuildPlan() {
             super((byte) 1);
         }
 
         @Override
+        /** Returns the size of the build-plan payload. */
         protected int dataSize() {
             return 2 + 2 + 1 + 2 + 1 + configSize(configType, configData);
         }
 
         @Override
+        /** Writes the plan coordinates, block, rotation, and config. */
         protected void writeData(ByteBuffer b) {
             b.putShort(x);
             b.putShort(y);
@@ -170,6 +191,7 @@ public abstract class Action {
         }
 
         @Override
+        /** Reads the plan coordinates, block, rotation, and config. */
         protected void readData(ByteBuffer b) {
             x = b.getShort();
             y = b.getShort();
@@ -181,25 +203,30 @@ public abstract class Action {
     }
 
     // BreakPlan (id=2): x(short), y(short)
+    /** Records cancelling a planned block at a tile. */
     public static class BreakPlan extends Action {
         public short x, y;
 
+        /** Creates a break-plan action. */
         public BreakPlan() {
             super((byte) 2);
         }
 
         @Override
+        /** Returns the coordinate payload size. */
         protected int dataSize() {
             return 2 + 2;
         }
 
         @Override
+        /** Writes the tile coordinates. */
         protected void writeData(ByteBuffer b) {
             b.putShort(x);
             b.putShort(y);
         }
 
         @Override
+        /** Reads the tile coordinates. */
         protected void readData(ByteBuffer b) {
             x = b.getShort();
             y = b.getShort();
@@ -207,6 +234,7 @@ public abstract class Action {
     }
 
     // Config (id=3): buildId(int), configType(byte), [value]
+    /** Records a configuration change to a building. */
     public static class Config extends Action {
         public int buildId;
         public byte configType;
@@ -214,16 +242,19 @@ public abstract class Action {
         public short configShortX, configShortY, configItemId;
         public byte[] configData;
 
+        /** Creates a building-config action. */
         public Config() {
             super((byte) 3);
         }
 
         @Override
+        /** Returns the size of the building ID and config payload. */
         protected int dataSize() {
             return 4 + 1 + configSize(configType, configData);
         }
 
         @Override
+        /** Writes the building ID and config value. */
         protected void writeData(ByteBuffer b) {
             b.putInt(buildId);
             b.put(configType);
@@ -231,6 +262,7 @@ public abstract class Action {
         }
 
         @Override
+        /** Reads the building ID and config value. */
         protected void readData(ByteBuffer b) {
             buildId = b.getInt();
             configType = b.get();
@@ -239,68 +271,83 @@ public abstract class Action {
     }
 
     // UnitControl (id=4): unitId(int)
+    /** Records transferring control to a unit. */
     public static class UnitControl extends Action {
         public int unitId;
 
+        /** Creates a unit-control action. */
         public UnitControl() {
             super((byte) 4);
         }
 
         @Override
+        /** Returns the unit ID payload size. */
         protected int dataSize() {
             return 4;
         }
 
         @Override
+        /** Writes the controlled unit ID. */
         protected void writeData(ByteBuffer b) {
             b.putInt(unitId);
         }
 
         @Override
+        /** Reads the controlled unit ID. */
         protected void readData(ByteBuffer b) {
             unitId = b.getInt();
         }
     }
 
     // UnitClear (id=5): no data
+    /** Records releasing control of a unit. */
     public static class UnitClear extends Action {
+        /** Creates a unit-clear action. */
         public UnitClear() {
             super((byte) 5);
         }
 
         @Override
+        /** Returns zero because this action has no payload. */
         protected int dataSize() {
             return 0;
         }
 
         @Override
+        /** Writes no payload for this action. */
         protected void writeData(ByteBuffer b) {}
 
         @Override
+        /** Reads no payload for this action. */
         protected void readData(ByteBuffer b) {}
     }
 
     // RotateBlock (id=6): buildId(int), direction(byte: 1=CW, 0=CCW)
+    /** Records rotating a building. */
     public static class RotateBlock extends Action {
         public int buildId;
         public byte direction;
 
+        /** Creates a building-rotation action. */
         public RotateBlock() {
             super((byte) 6);
         }
 
         @Override
+        /** Returns the building ID and direction payload size. */
         protected int dataSize() {
             return 4 + 1;
         }
 
         @Override
+        /** Writes the building ID and rotation direction. */
         protected void writeData(ByteBuffer b) {
             b.putInt(buildId);
             b.put(direction);
         }
 
         @Override
+        /** Reads the building ID and rotation direction. */
         protected void readData(ByteBuffer b) {
             buildId = b.getInt();
             direction = b.get();
@@ -309,6 +356,7 @@ public abstract class Action {
 
     // Command (id=7): target type in low two bits (0=position, 1=unit, 2=building),
     // queued flag in bit 2, then targetId, position, unitCount and unitIds.
+    /** Records a unit command and its selected units. */
     public static class Command extends Action {
         public byte cmdType;
         public int targetId;
@@ -316,11 +364,13 @@ public abstract class Action {
         public short unitCount;
         public int[] unitIds = new int[0];
 
+        /** Creates a unit-command action. */
         public Command() {
             super((byte) 7);
         }
 
         @Override
+        /** Returns the command payload size and validates its unit count. */
         protected int dataSize() {
             int count = unitIds == null ? 0 : unitIds.length;
             if (count > Short.MAX_VALUE) {
@@ -330,6 +380,7 @@ public abstract class Action {
         }
 
         @Override
+        /** Writes command target, position, and selected unit IDs. */
         protected void writeData(ByteBuffer b) {
             int count = unitIds == null ? 0 : unitIds.length;
             if (count > Short.MAX_VALUE) {
@@ -349,6 +400,7 @@ public abstract class Action {
         }
 
         @Override
+        /** Reads command target, position, and selected unit IDs. */
         protected void readData(ByteBuffer b) {
             cmdType = b.get();
             targetId = b.getInt();
@@ -366,21 +418,25 @@ public abstract class Action {
     }
 
     // PayloadAction (id=8): payloadActionType(byte: 1=Pickup, 2=Drop), targetType(byte: 1=Unit, 2=Building, 3=Position), targetId(int), dropX(float), dropY(float)
+    /** Records picking up or dropping a payload. */
     public static class PayloadAction extends Action {
         public byte payloadActionType, targetType;
         public int targetId;
         public float dropX, dropY;
 
+        /** Creates a payload action. */
         public PayloadAction() {
             super((byte) 8);
         }
 
         @Override
+        /** Returns the fixed payload-action size. */
         protected int dataSize() {
             return 1 + 1 + 4 + 4 + 4;
         }
 
         @Override
+        /** Writes the payload target and drop coordinates. */
         protected void writeData(ByteBuffer b) {
             b.put(payloadActionType);
             b.put(targetType);
@@ -390,6 +446,7 @@ public abstract class Action {
         }
 
         @Override
+        /** Reads the payload target and drop coordinates. */
         protected void readData(ByteBuffer b) {
             payloadActionType = b.get();
             targetType = b.get();
@@ -400,25 +457,30 @@ public abstract class Action {
     }
 
     // TileTap (id=9): x(short), y(short)
+    /** Records tapping a tile. */
     public static class TileTap extends Action {
         public short x, y;
 
+        /** Creates a tile-tap action. */
         public TileTap() {
             super((byte) 9);
         }
 
         @Override
+        /** Returns the tile-coordinate payload size. */
         protected int dataSize() {
             return 2 + 2;
         }
 
         @Override
+        /** Writes the tile coordinates. */
         protected void writeData(ByteBuffer b) {
             b.putShort(x);
             b.putShort(y);
         }
 
         @Override
+        /** Reads the tile coordinates. */
         protected void readData(ByteBuffer b) {
             x = b.getShort();
             y = b.getShort();
@@ -426,48 +488,58 @@ public abstract class Action {
     }
 
     // BuildPause (id=10): isBuilding(byte: 1=active, 0=paused)
+    /** Records whether automatic building is active. */
     public static class BuildPause extends Action {
         public byte isBuilding;
 
+        /** Creates a build-pause action. */
         public BuildPause() {
             super((byte) 10);
         }
 
         @Override
+        /** Returns the one-byte state payload size. */
         protected int dataSize() {
             return 1;
         }
 
         @Override
+        /** Writes the automatic-building state. */
         protected void writeData(ByteBuffer b) {
             b.put(isBuilding);
         }
 
         @Override
+        /** Reads the automatic-building state. */
         protected void readData(ByteBuffer b) {
             isBuilding = b.get();
         }
     }
 
     // ModeChange (id=11): PlaceMode ordinal(byte)
+    /** Records a change to the placement mode. */
     public static class ModeChange extends Action {
         public byte mode;
 
+        /** Creates a placement-mode action. */
         public ModeChange() {
             super((byte) 11);
         }
 
         @Override
+        /** Returns the one-byte mode payload size. */
         protected int dataSize() {
             return 1;
         }
 
         @Override
+        /** Writes the placement-mode ordinal. */
         protected void writeData(ByteBuffer b) {
             b.put(mode);
         }
 
         @Override
+        /** Reads the placement-mode ordinal. */
         protected void readData(ByteBuffer b) {
             mode = b.get();
         }

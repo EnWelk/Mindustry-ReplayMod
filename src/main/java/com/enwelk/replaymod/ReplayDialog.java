@@ -216,6 +216,7 @@ public class ReplayDialog extends BaseDialog {
         endDialog.show();
     }
 
+    /** Shows the replay-stopped dialog. */
     private void showPlaybackStopped() {
         statusText = Core.bundle.get("replaymod.status.stopped");
         if (endMessage != null) endMessage.setText(Core.bundle.get("replaymod.stopped.message"));
@@ -223,6 +224,7 @@ public class ReplayDialog extends BaseDialog {
         endDialog.show();
     }
 
+    /** Checks recorded mod metadata before starting playback. */
     private void startPlayback(Path path) {
         try {
             controller.startPlayback(path);
@@ -233,6 +235,7 @@ public class ReplayDialog extends BaseDialog {
         }
     }
 
+    /** Displays a compatibility warning for missing or changed mods. */
     private void showModWarning(Path path, List<String> usedMods) {
         Set<String> installedMods = new HashSet<>();
         Vars.mods.list().each(loaded -> {

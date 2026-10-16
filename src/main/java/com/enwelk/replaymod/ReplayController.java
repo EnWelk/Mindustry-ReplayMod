@@ -36,7 +36,7 @@ import mindustry.world.Block;
 import mindustry.world.Tile;
 
 public class ReplayController {
-    private static final long MAX_SEEK_STEP = 60L;
+    private static final long MAX_SEEK_STEP = 300L;
     private static final int MAX_SEEK_UPDATES_PER_FRAME = 8;
 
     private InputHandler previousInput;
@@ -58,6 +58,7 @@ public class ReplayController {
     private Runnable playbackFinished = () -> {};
     private Runnable playbackStopped = () -> {};
 
+    /** Begins recording the current offline game to a replay file. */
     public void startRecording(Path path) throws IOException {
         ensureIdle();
         if (Vars.net.active()) {
@@ -90,38 +91,47 @@ public class ReplayController {
         }
     }
 
+    /** Returns whether a replay is being recorded or played. */
     public boolean isActive() {
         return recordingInput != null || reader != null;
     }
 
+    /** Returns whether replay recording is active. */
     public boolean isRecording() {
         return recordingInput != null;
     }
 
+    /** Returns whether replay playback is active. */
     public boolean isPlaying() {
         return reader != null;
     }
 
+    /** Returns the current replay-relative tick. */
     public long currentTick() {
         return currentTick;
     }
 
+    /** Returns the total replay duration in ticks. */
     public long durationTicks() {
         return durationTicks;
     }
 
+    /** Returns the active playback speed multiplier. */
     public int playbackSpeed() {
         return playbackSpeed;
     }
 
+    /** Sets the callback invoked when playback reaches its end. */
     public void setPlaybackFinishedListener(Runnable listener) {
         playbackFinished = listener == null ? () -> {} : listener;
     }
 
+    /** Sets the callback invoked when playback is manually stopped. */
     public void setPlaybackStoppedListener(Runnable listener) {
         playbackStopped = listener == null ? () -> {} : listener;
     }
 
+    /** Stops playback manually and notifies the stopped listener. */
     public void stopPlaybackManually() throws IOException {
         if (reader == null) return;
         stopPlayback();
@@ -141,7 +151,9 @@ public class ReplayController {
     public void seek(long targetTick) {
         if (reader == null) return;
         long target = Math.max(0L, Math.min(targetTick, durationTicks));
-        pauseAfterSeek = isPlaybackPaused();
+        if (seekTarget < 0L) {
+            pauseAfterSeek = isPlaybackPaused();
+        }
         if (target == currentTick && seekTarget < 0L) return;
         if (target < currentTick) {
             try {
@@ -159,6 +171,7 @@ public class ReplayController {
         }
     }
 
+    /** Advances a pending seek while respecting the per-frame simulation limit. */
     void advanceSeek() {
         if (reader == null || seekTarget < 0L || Vars.state == null) return;
         long target = seekTarget;
@@ -205,6 +218,7 @@ public class ReplayController {
         }
     }
 
+    /** Completes a seek and restores its requested pause state. */
     private void completeSeek() {
         seekTarget = -1L;
         installPlaybackTimeScale();
@@ -222,10 +236,12 @@ public class ReplayController {
         Vars.state.tick += Time.delta - rawDelta;
     }
 
+    /** Returns whether playback or the game state is paused. */
     public boolean isPlaybackPaused() {
         return playbackPaused || (Vars.state != null && Vars.state.isPaused());
     }
 
+    /** Returns whether playback is currently advancing toward a seek target. */
     public boolean isSeeking() {
         return seekTarget >= 0L;
     }
@@ -293,6 +309,7 @@ public class ReplayController {
         }
     }
 
+    /** Stops the active recording or playback session. */
     public void stop() throws IOException {
         if (recordingInput != null) {
             ReplayRecordInput oldInput = recordingInput;
@@ -375,6 +392,7 @@ public class ReplayController {
         }
     }
 
+    /** Applies the most recent recorded movement, aim, and player state. */
     private void applyLastTick() {
         if (lastTick == null || Vars.player == null || Vars.player.unit() == null) return;
 
@@ -396,6 +414,7 @@ public class ReplayController {
         player.mouseY = lastTick.aimY();
     }
 
+    /** Applies one recorded gameplay action to the active replay world. */
     private void apply(Action action) {
         Player player = Vars.player;
         if (player == null) return;
@@ -445,6 +464,7 @@ public class ReplayController {
         }
     }
 
+    /** Applies a recorded unit command to its target and selected units. */
     private void applyCommand(Action.Command action, Player player) {
         int targetType = action.cmdType & 3;
         boolean queued = (action.cmdType & 4) != 0;
@@ -473,6 +493,7 @@ public class ReplayController {
             new Vec2(action.posX, action.posY), queued, true);
     }
 
+    /** Applies a recorded payload pickup or drop request. */
     private void applyPayload(Action.PayloadAction action, Player player) {
         if (action.payloadActionType == 2) {
             Call.requestDropPayload(player, action.dropX, action.dropY);
@@ -487,6 +508,7 @@ public class ReplayController {
         }
     }
 
+    /** Decodes a config value according to its recorded type. */
     private Object readConfig(byte type, int integer, short x, short y, short itemId, byte[] data) {
         return switch (type) {
             case 0 -> null;
@@ -499,11 +521,13 @@ public class ReplayController {
         };
     }
 
+    /** Parses a serialized config value encoded as JSON. */
     private Jval readJsonConfig(byte[] data) {
         if (data == null) throw new IllegalArgumentException("Missing JSON replay config");
         return Jval.read(new String(data, StandardCharsets.UTF_8));
     }
 
+    /** Reads a config value encoded by Mindustry's TypeIO serializer. */
     private Object readSerializedConfig(byte[] data) {
         if (data == null) throw new IllegalArgumentException("Missing serialized replay config");
         try (DataInputStream input = new DataInputStream(new ByteArrayInputStream(data))) {
@@ -517,6 +541,7 @@ public class ReplayController {
         }
     }
 
+    /** Closes playback and restores the input handler and game time scale. */
     private void stopPlayback() throws IOException {
         RepReader oldReader = reader;
         Viewer oldInput = playbackInput;
@@ -599,6 +624,7 @@ public class ReplayController {
         });
     }
 
+    /** Rejects a new replay operation while another session is active. */
     private void ensureIdle() {
         if (recordingInput != null || reader != null) {
             throw new IllegalStateException("A replay is already active");

@@ -31,11 +31,13 @@ public class ReplayHud {
     private Label timelineLabel;
     private BaseDialog speedDialog;
 
+    /** Creates the HUD overlay for active replay controls. */
     public ReplayHud(ReplayMod mod, ReplayController controller) {
         this.mod = mod;
         this.controller = controller;
     }
 
+    /** Adds the draggable replay-menu button and playback controls. */
     public void load() {
         arc.Events.on(ClientLoadEvent.class, event -> {
             if (Vars.ui == null || Vars.ui.menufrag == null) return;
@@ -46,6 +48,7 @@ public class ReplayHud {
             Element skipWave = arc.Core.scene.find("skip");
             if (skipWave != null) {
                 skipWave.addCaptureListener(new InputListener() {
+                    /** Prevents advancing waves during replay playback. */
                     @Override
                     public boolean touchDown(InputEvent event, float x, float y, int pointer, KeyCode key) {
                         return controller.isPlaying();
@@ -82,6 +85,7 @@ public class ReplayHud {
                 private boolean dragged;
                 private int activePointer = -1;
 
+                /** Begins dragging the replay button. */
                 @Override
                 public boolean touchDown(InputEvent event, float x, float y, int pointer, KeyCode key) {
                     if (activePointer != -1) return false;
@@ -92,6 +96,7 @@ public class ReplayHud {
                     return true;
                 }
 
+                /** Moves the button while clamping it to the HUD bounds. */
                 @Override
                 public void touchDragged(InputEvent event, float x, float y, int pointer) {
                     if (pointer != activePointer) return;
@@ -119,6 +124,7 @@ public class ReplayHud {
                     lastStageY = event.stageY;
                 }
 
+                /** Saves the button position or opens the replay manager. */
                 @Override
                 public void touchUp(InputEvent event, float x, float y, int pointer, KeyCode key) {
                     if (pointer != activePointer) return;
@@ -154,6 +160,12 @@ public class ReplayHud {
         timeline = new Slider(0f, 1f, 1f, false);
         playbackControls.add(timeline).colspan(4).growX().height(28f).pad(3f);
         timeline.addListener(new InputListener() {
+            /** Captures slider gestures and seeks when the pointer is released. */
+            @Override
+            public boolean touchDown(InputEvent event, float x, float y, int pointer, KeyCode key) {
+                return controller.isPlaying();
+            }
+
             @Override
             public void touchUp(InputEvent event, float x, float y, int pointer, KeyCode key) {
                 if (controller.isPlaying()) {
@@ -192,6 +204,7 @@ public class ReplayHud {
         speedDialog = createSpeedDialog();
     }
 
+    /** Builds the list of supported replay speed choices. */
     private BaseDialog createSpeedDialog() {
         BaseDialog dialog = new BaseDialog(Core.bundle.get("replaymod.speed"));
         dialog.cont.button(Core.bundle.get("replaymod.speed.normal"), () -> {
@@ -208,19 +221,23 @@ public class ReplayHud {
         return dialog;
     }
 
+    /** Toggles playback pause state and updates its button label. */
     private void togglePause() {
         controller.setPlaybackPaused(!controller.isPlaybackPaused());
     }
 
+    /** Shows the available playback speed multipliers. */
     private void showSpeedOptions() {
         if (controller.isPlaying()) speedDialog.show();
     }
 
+    /** Seeks by a relative number of simulation ticks. */
     private void seekBy(long ticks) {
         long target = Math.max(0L, Math.min(controller.currentTick() + ticks, controller.durationTicks()));
         controller.seek(target);
     }
 
+    /** Stops playback and reports any shutdown error. */
     private void stopPlayback() {
         try {
             controller.stopPlaybackManually();
@@ -229,6 +246,7 @@ public class ReplayHud {
         }
     }
 
+    /** Formats a replay tick as a user-facing time value. */
     private String formatTime(long ticks) {
         long seconds = ticks / 60L;
         return (seconds / 60L) + ":" + String.format(java.util.Locale.ROOT, "%02d", seconds % 60L);

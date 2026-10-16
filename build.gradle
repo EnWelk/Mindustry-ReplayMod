@@ -3,10 +3,14 @@ plugins {
 }
 
 group = 'com.enwelk'
-version = '0.3.2'
+version = '0.3.3'
 
 base {
     archivesName = 'ReplayMod'
+}
+
+test {
+    useJUnitPlatform()
 }
 
 def mindustryDir = file(providers.gradleProperty('mindustryDir').get())
@@ -35,6 +39,10 @@ configurations {
 }
 
 dependencies {
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.12.2'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher:1.12.2'
+    testImplementation 'org.mockito:mockito-core:5.12.0'
+
     def mindustryJar = new File(
         mindustryDir, 'core/build/libs/core-release.jar'
     )
@@ -44,10 +52,14 @@ dependencies {
 
     if (mindustryJar.exists()) {
         compileOnly files(mindustryJar)
+        testCompileOnly files(mindustryJar)
+        testRuntimeOnly files(mindustryJar)
     }
 
     if (arcJar.exists()) {
         compileOnly files(arcJar)
+        testCompileOnly files(arcJar)
+        testRuntimeOnly files(arcJar)
     }
 
     androidDex 'com.android.tools:r8:8.3.37'
@@ -144,4 +156,8 @@ tasks.named('jar') {
     dependsOn tasks.named('dexMod')
     from(dexOutput)
     from('mod.hjson')
+}
+
+tasks.named('test') {
+    useJUnitPlatform()
 }
