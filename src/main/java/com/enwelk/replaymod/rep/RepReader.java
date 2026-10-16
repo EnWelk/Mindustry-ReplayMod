@@ -23,10 +23,15 @@ public class RepReader implements Closeable {
     private static final int MAX_RECORD_SIZE = 64 * 1024 * 1024;
 
     private final FileChannel channel;
+    private final Path filePath;
     private final ByteBuffer inputBuffer = ByteBuffer.allocate(64 * 1024);
     private final float version;
+    private long recordsStart;
+    private long firstTick = Long.MAX_VALUE;
+    private long endTick;
 
     public RepReader(Path filePath) throws IOException {
+        this.filePath = filePath;
         channel = FileChannel.open(filePath, StandardOpenOption.READ);
         inputBuffer.limit(0);
         try {
@@ -43,6 +48,67 @@ public class RepReader implements Closeable {
 
     public float version() {
         return version;
+    }
+
+    /** Validates an import's framing without loading its embedded map into the active world. */
+    public static void validateForImport(Path filePath) throws IOException {
+        try (FileChannel file = FileChannel.open(filePath, StandardOpenOption.READ)) {
+            ByteBuffer header = ByteBuffer.allocate(3 + Float.BYTES + Integer.BYTES)
+                .order(ByteOrder.LITTLE_ENDIAN);
+            while (header.hasRemaining()) {
+                if (file.read(header) < 0) throw new IOException("Replay file is truncated");
+            }
+            header.flip();
+            if (header.get() != 'R' || header.get() != 'E' || header.get() != 'P') {
+                throw new IOException("Invalid replay header");
+            }
+            float version = header.getFloat();
+            if (Float.compare(version, ReplayMod.replayVersion()) != 0 && Float.compare(version, 1f) != 0) {
+                throw new IOException("Unsupported replay version: " + version);
+            }
+            int mapSize = header.getInt();
+            if (mapSize <= 0 || mapSize > MAX_MAP_SIZE ||
+                file.size() < 3L + Float.BYTES + Integer.BYTES + mapSize + 1L + Integer.BYTES + Long.BYTES) {
+                throw new IOException("Invalid or truncated replay map data");
+            }
+        }
+    }
+
+    /** Scans the replay timeline without retaining every record in memory. */
+    public void scanTimeline() throws IOException {
+        resetRecords();
+        firstTick = Long.MAX_VALUE;
+        endTick = 0L;
+        boolean foundEnd = false;
+        ReplayRecord record;
+        while ((record = readNext()) != null) {
+            firstTick = Math.min(firstTick, record.tick());
+            if (record instanceof EndRecord end) {
+                endTick = end.tick();
+                foundEnd = true;
+                break;
+            }
+        }
+        if (!foundEnd) throw new IOException("Replay is missing its end record");
+        if (firstTick == Long.MAX_VALUE) firstTick = 0L;
+        resetRecords();
+    }
+
+    /** Returns the first recorded game tick, used as the replay's time origin. */
+    public long firstTick() {
+        return firstTick;
+    }
+
+    /** Returns the end tick in the original replay timeline. */
+    public long endTick() {
+        return endTick;
+    }
+
+    /** Rewinds record reading to the first record after the embedded save. */
+    private void resetRecords() throws IOException {
+        channel.position(recordsStart);
+        inputBuffer.position(0);
+        inputBuffer.limit(0);
     }
 
     private float readHeader() throws IOException {
@@ -81,6 +147,7 @@ public class RepReader implements Closeable {
         } finally {
             Files.deleteIfExists(tempPath);
         }
+        recordsStart = channel.position() - inputBuffer.remaining();
         return fileVersion;
     }
 

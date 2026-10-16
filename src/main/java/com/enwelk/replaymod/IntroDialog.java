@@ -13,13 +13,13 @@ public class IntroDialog extends BaseDialog {
         super("@replaymod.intro.title");
 
         cont.margin(16f);
-        cont.add("@replaymod.intro.message\\nIf you find the bag, please message me on Telegram: @EnWelk").wrap().width(420f).pad(12f);
+        cont.add("Intro message\\nIf you find the bag, please message me on Telegram: @EnWelk").wrap().width(420f).pad(12f);
         cont.row();
-        cont.check("@replaymod.intro.dontShowAgain",
+        cont.check("Dont show again",
             Core.settings.getBool(DISMISSED_SETTING, false),
             checked -> Core.settings.put(DISMISSED_SETTING, checked)
         ).left().pad(8f);
-        buttons.button("@replaymod.close", Icon.cancel, this::hide).size(200f, 58f);
+        buttons.button("Close", Icon.cancel, this::hide).size(200f, 58f);
         closeOnBack();
     }
 

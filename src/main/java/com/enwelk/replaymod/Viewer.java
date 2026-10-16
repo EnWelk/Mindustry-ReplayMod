@@ -22,8 +22,15 @@ public class Viewer extends DesktopInput {
     @Override
     public void update() {
         if (!controller.isPlaying()) return;
+        if (controller.isSeeking()) {
+            controller.advanceSeek();
+            return;
+        }
         updateCamera();
-        if (!controller.isPlaybackPaused()) controller.updatePlayback();
+        if (!controller.isPlaybackPaused()) {
+            controller.syncPlaybackClock();
+            controller.updatePlayback();
+        }
     }
 
     /** Keeps camera movement independent from the unit controlled by playback. */

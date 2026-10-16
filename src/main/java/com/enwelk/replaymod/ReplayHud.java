@@ -1,8 +1,10 @@
 package com.enwelk.replaymod;
 
 import arc.input.KeyCode;
+import arc.scene.Element;
 import arc.scene.event.InputEvent;
 import arc.scene.event.InputListener;
+import arc.scene.ui.Button;
 import arc.scene.ui.TextButton;
 import arc.scene.ui.layout.Table;
 import mindustry.Vars;
@@ -24,10 +26,24 @@ public class ReplayHud {
             if (Vars.ui == null || Vars.ui.menufrag == null) return;
 
             dialog = new ReplayDialog(mod, controller);
-            Vars.ui.menufrag.addButton("@replaymod.open", Icon.play, this::open);
+            Vars.ui.menufrag.addButton(arc.Core.bundle.get("replaymod.open"), Icon.play, this::open);
+            Element skipWave = arc.Core.scene.find("skip");
+            if (skipWave != null) {
+                skipWave.addCaptureListener(new InputListener() {
+                    @Override
+                    public boolean touchDown(InputEvent event, float x, float y, int pointer, KeyCode key) {
+                        return controller.isPlaying();
+                    }
+                });
+                skipWave.update(() -> {
+                    if (skipWave instanceof Button button) {
+                        button.setDisabled(controller.isPlaying());
+                    }
+                });
+            }
 
             Table hudButton = new Table();
-            TextButton button = hudButton.button("@replaymod.open", Icon.play, () -> {})
+            TextButton button = hudButton.button(arc.Core.bundle.get("replaymod.open"), Icon.play, () -> {})
                 .size(150f, 48f).get();
             hudButton.setSize(150f, 48f);
             hudButton.setPosition(

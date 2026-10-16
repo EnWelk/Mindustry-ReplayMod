@@ -6,8 +6,13 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 
+import arc.Core;
+import arc.input.KeyCode;
+import arc.input.KeyBind.Axis;
+import arc.math.Mathf;
 import arc.util.Log;
 import arc.math.geom.Vec2;
+import arc.util.Time;
 import arc.util.io.Reads;
 import arc.util.serialization.Jval;
 import mindustry.Vars;
@@ -20,6 +25,7 @@ import mindustry.gen.Mechc;
 import mindustry.gen.Player;
 import mindustry.gen.Unit;
 import mindustry.input.DesktopInput;
+import mindustry.input.Binding;
 import mindustry.input.InputHandler;
 import mindustry.input.PlaceMode;
 import mindustry.io.TypeIO;
@@ -34,10 +40,18 @@ public class ReplayController {
     private ReplayRecordInput recordingInput;
     private RepReader reader;
     private Viewer playbackInput;
+    private Path playbackPath;
     private RepReader.ReplayRecord nextRecord;
     private RepReader.TickRecord lastTick;
     private long currentTick;
+    private long playbackOrigin;
+    private long durationTicks;
+    private long seekTarget = -1L;
     private boolean playbackPaused;
+    private boolean pauseAfterSeek;
+    private int playbackSpeed = 1;
+    private Axis previousSkipWaveBinding;
+    private Runnable playbackFinished = () -> {};
 
     public void startRecording(Path path) throws IOException {
         ensureIdle();
@@ -87,8 +101,84 @@ public class ReplayController {
         return currentTick;
     }
 
+    public long durationTicks() {
+        return durationTicks;
+    }
+
+    public int playbackSpeed() {
+        return playbackSpeed;
+    }
+
+    public void setPlaybackFinishedListener(Runnable listener) {
+        playbackFinished = listener == null ? () -> {} : listener;
+    }
+
+    /** Sets the simulation multiplier used while playback is running. */
+    public void setPlaybackSpeed(int speed) {
+        if (speed != 1 && speed != 2 && speed != 3 && speed != 5 && speed != 10) {
+            throw new IllegalArgumentException("Unsupported replay speed: " + speed);
+        }
+        playbackSpeed = speed;
+        if (reader != null && seekTarget < 0L) installPlaybackTimeScale();
+    }
+
+    /** Requests a seek; backward seeks restore the embedded map before simulating forward. */
+    public void seek(long targetTick) {
+        if (reader == null) return;
+        long target = Math.max(0L, Math.min(targetTick, durationTicks));
+        if (target < currentTick) {
+            try {
+                restartPlayback();
+            } catch (IOException | RuntimeException e) {
+                Log.err("Could not restart replay for backward seek", e);
+                return;
+            }
+            if (reader == null) return;
+        }
+        if (target == currentTick) return;
+        seekTarget = target;
+        pauseAfterSeek = playbackPaused;
+        playbackPaused = false;
+        if (Vars.state != null) Vars.state.set(GameState.State.playing);
+    }
+
+    /** Runs simulation ticks without a frame-rate cap until the requested tick is reached. */
+    void advanceSeek() {
+        if (reader == null || seekTarget < 0L || Vars.state == null) return;
+        long target = seekTarget;
+        Time.setDeltaProvider(() -> 1f);
+        try {
+            while (reader != null && currentTick < target) {
+                double before = Vars.state.tick;
+                Vars.logic.update();
+                if (reader == null) return;
+                Vars.state.tick = before + 1d;
+                currentTick = (long)Math.floor(Vars.state.tick);
+                updatePlayback();
+            }
+        } finally {
+            if (reader != null) {
+                seekTarget = -1L;
+                installPlaybackTimeScale();
+                playbackPaused = pauseAfterSeek;
+                if (playbackPaused) Vars.state.set(GameState.State.paused);
+            }
+        }
+    }
+
+    /** Advances the replay clock to match the simulation multiplier. */
+    void syncPlaybackClock() {
+        if (reader == null || playbackPaused || seekTarget >= 0L || Vars.state == null) return;
+        float rawDelta = Core.graphics.getDeltaTime() * 60f;
+        Vars.state.tick += Time.delta - rawDelta;
+    }
+
     public boolean isPlaybackPaused() {
         return playbackPaused;
+    }
+
+    public boolean isSeeking() {
+        return seekTarget >= 0L;
     }
 
     /** Pauses or resumes replay simulation. */
@@ -113,15 +203,24 @@ public class ReplayController {
         InputHandler input = Vars.control.input;
         RepReader newReader = new RepReader(path);
         try {
+            newReader.scanTimeline();
             previousInput = input;
             reader = newReader;
+            playbackPath = path;
+            playbackOrigin = newReader.firstTick();
+            durationTicks = Math.max(0L, newReader.endTick() - playbackOrigin);
             playbackInput = new Viewer(this);
             nextRecord = reader.readNext();
             lastTick = null;
             currentTick = 0L;
             playbackPaused = false;
+            Vars.state.tick = 0d;
             Vars.control.setInput(playbackInput);
+            previousSkipWaveBinding = Binding.skipWave.value;
+            Binding.skipWave.value = new Axis(KeyCode.unset);
+            installPlaybackTimeScale();
             Vars.state.set(GameState.State.playing);
+            updatePlayback();
         } catch (IOException | RuntimeException e) {
             if (Vars.control != null && Vars.control.input == playbackInput) {
                 try {
@@ -193,9 +292,10 @@ public class ReplayController {
 
         long currentTick = (long)Math.floor(Vars.state.tick);
         this.currentTick = currentTick;
+        long replayTick = playbackOrigin + currentTick;
         boolean finished = false;
         try {
-            while (nextRecord != null && nextRecord.tick() <= currentTick) {
+            while (nextRecord != null && nextRecord.tick() <= replayTick) {
                 if (nextRecord instanceof RepReader.TickRecord tickRecord) {
                     lastTick = tickRecord;
                 } else if (nextRecord instanceof RepReader.ActionRecord actionRecord) {
@@ -219,6 +319,7 @@ public class ReplayController {
         if (finished) {
             try {
                 stopPlayback();
+                playbackFinished.run();
             } catch (IOException e) {
                 Log.err("Failed to close replay after playback", e);
             }
@@ -376,6 +477,7 @@ public class ReplayController {
         nextRecord = null;
         lastTick = null;
         playbackPaused = false;
+        seekTarget = -1L;
         try {
             if (Vars.player != null) {
                 Vars.player.shooting = false;
@@ -390,10 +492,62 @@ public class ReplayController {
             if (Vars.control != null && Vars.control.input == oldInput && previousInput != null) {
                 Vars.control.setInput(previousInput);
             }
+            if (previousSkipWaveBinding != null) {
+                Binding.skipWave.value = previousSkipWaveBinding;
+                previousSkipWaveBinding = null;
+            }
+            restoreDefaultTimeScale();
         } finally {
             previousInput = null;
+            playbackPath = null;
             if (oldReader != null) oldReader.close();
         }
+    }
+
+    /** Reloads the embedded save and resets playback before simulating forward. */
+    private void restartPlayback() throws IOException {
+        if (playbackPath == null) throw new IOException("Replay path is unavailable");
+        RepReader restarted = new RepReader(playbackPath);
+        try {
+            restarted.scanTimeline();
+            RepReader oldReader = reader;
+            reader = restarted;
+            playbackOrigin = restarted.firstTick();
+            durationTicks = Math.max(0L, restarted.endTick() - playbackOrigin);
+            nextRecord = restarted.readNext();
+            lastTick = null;
+            currentTick = 0L;
+            Vars.state.tick = 0d;
+            Vars.state.set(GameState.State.playing);
+            if (Vars.control.input != playbackInput) Vars.control.setInput(playbackInput);
+            oldReader.close();
+            updatePlayback();
+        } catch (IOException | RuntimeException e) {
+            try {
+                restarted.close();
+            } catch (IOException closeError) {
+                e.addSuppressed(closeError);
+            }
+            throw e;
+        }
+    }
+
+    /** Applies the standard client delta with the selected replay multiplier. */
+    private void installPlaybackTimeScale() {
+        Time.setDeltaProvider(() -> {
+            float delta = Core.graphics.getDeltaTime() * 60f;
+            if (Float.isNaN(delta) || Float.isInfinite(delta)) delta = 1f;
+            return Mathf.clamp(delta, 0.0001f, Vars.maxDeltaClient) * playbackSpeed;
+        });
+    }
+
+    /** Restores Mindustry's normal client delta provider after playback. */
+    private void restoreDefaultTimeScale() {
+        Time.setDeltaProvider(() -> {
+            float delta = Core.graphics.getDeltaTime() * 60f;
+            if (Float.isNaN(delta) || Float.isInfinite(delta)) delta = 1f;
+            return Mathf.clamp(delta, 0.0001f, Vars.maxDeltaClient);
+        });
     }
 
     private void ensureIdle() {
