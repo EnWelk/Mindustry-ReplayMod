@@ -27,7 +27,7 @@ public class Viewer extends DesktopInput {
             return;
         }
         updateCamera();
-        if (!controller.isPlaybackPaused()) {
+        if (!controller.isPlaybackPaused() && Vars.state != null && Vars.state.isPlaying()) {
             controller.syncPlaybackClock();
             controller.updatePlayback();
         }

@@ -5,12 +5,15 @@ For manual builds, replace mindustryDir and arcDir with the actual paths.
 Replay format .rep
 
 TODO:
-- Fix replay pause bag
-- Fix replay timeline bag
 - Fix some bag in map after replay
 - Record and replay complete multiplayer sessions, including actions from every player and server-authoritative world changes.
 
 Change log:
+  - v3.1
+    - Ui update
+    - Fix rewind
+    - Fix replay pause bag
+    - Fix replay timeline bag
   - v0.3
     - Locked "Next wave" button
     - Upgade replay controls

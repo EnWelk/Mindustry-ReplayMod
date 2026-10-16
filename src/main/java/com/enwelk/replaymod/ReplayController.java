@@ -35,6 +35,9 @@ import com.enwelk.replaymod.rep.RepReader;
 import com.enwelk.replaymod.rep.RepWriter;
 
 public class ReplayController {
+    private static final long MAX_SEEK_STEP = 60L;
+    private static final int MAX_SEEK_UPDATES_PER_FRAME = 8;
+
     private InputHandler previousInput;
     private RepWriter writer;
     private ReplayRecordInput recordingInput;
@@ -126,6 +129,7 @@ public class ReplayController {
     public void seek(long targetTick) {
         if (reader == null) return;
         long target = Math.max(0L, Math.min(targetTick, durationTicks));
+        pauseAfterSeek = isPlaybackPaused();
         if (target < currentTick) {
             try {
                 restartPlayback();
@@ -137,24 +141,37 @@ public class ReplayController {
         }
         if (target == currentTick) return;
         seekTarget = target;
-        pauseAfterSeek = playbackPaused;
         playbackPaused = false;
         if (Vars.state != null) Vars.state.set(GameState.State.playing);
     }
 
-    /** Runs simulation ticks without a frame-rate cap until the requested tick is reached. */
+    /** Advances a bounded batch of simulation time toward the seek target. */
     void advanceSeek() {
         if (reader == null || seekTarget < 0L || Vars.state == null) return;
         long target = seekTarget;
-        Time.setDeltaProvider(() -> 1f);
         try {
-            while (reader != null && currentTick < target) {
+            int updates = 0;
+            while (reader != null && currentTick < target && updates < MAX_SEEK_UPDATES_PER_FRAME) {
+                long replayTick = playbackOrigin + currentTick;
+                if (nextRecord != null && nextRecord.tick() <= replayTick) {
+                    updatePlayback();
+                    if (reader == null) return;
+                    continue;
+                }
+
+                long step = Math.min(MAX_SEEK_STEP, target - currentTick);
+                if (nextRecord != null) {
+                    step = Math.min(step, Math.max(1L, nextRecord.tick() - replayTick));
+                }
                 double before = Vars.state.tick;
+                long simulationStep = step;
+                Time.setDeltaProvider(() -> simulationStep);
                 Vars.logic.update();
                 if (reader == null) return;
-                Vars.state.tick = before + 1d;
+                Vars.state.tick = before + step;
                 currentTick = (long)Math.floor(Vars.state.tick);
                 updatePlayback();
+                updates++;
             }
         } finally {
             if (reader != null) {
@@ -168,13 +185,14 @@ public class ReplayController {
 
     /** Advances the replay clock to match the simulation multiplier. */
     void syncPlaybackClock() {
-        if (reader == null || playbackPaused || seekTarget >= 0L || Vars.state == null) return;
+        if (reader == null || isPlaybackPaused() || seekTarget >= 0L ||
+            Vars.state == null || !Vars.state.isPlaying()) return;
         float rawDelta = Core.graphics.getDeltaTime() * 60f;
         Vars.state.tick += Time.delta - rawDelta;
     }
 
     public boolean isPlaybackPaused() {
-        return playbackPaused;
+        return playbackPaused || (Vars.state != null && Vars.state.isPaused());
     }
 
     public boolean isSeeking() {
@@ -471,7 +489,7 @@ public class ReplayController {
     private void stopPlayback() throws IOException {
         RepReader oldReader = reader;
         Viewer oldInput = playbackInput;
-        boolean wasPaused = playbackPaused;
+        boolean wasPaused = isPlaybackPaused();
         reader = null;
         playbackInput = null;
         nextRecord = null;

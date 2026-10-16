@@ -1,20 +1,36 @@
 package com.enwelk.replaymod;
 
+import java.io.IOException;
+
+import arc.Core;
 import arc.input.KeyCode;
 import arc.scene.Element;
 import arc.scene.event.InputEvent;
 import arc.scene.event.InputListener;
 import arc.scene.ui.Button;
+import arc.scene.ui.Label;
+import arc.scene.ui.Slider;
 import arc.scene.ui.TextButton;
 import arc.scene.ui.layout.Table;
+import arc.util.Log;
 import mindustry.Vars;
 import mindustry.game.EventType.ClientLoadEvent;
 import mindustry.gen.Icon;
+import mindustry.ui.dialogs.BaseDialog;
 
 public class ReplayHud {
     private final ReplayMod mod;
     private final ReplayController controller;
     private ReplayDialog dialog;
+    private Table playbackControls;
+    private TextButton pauseButton;
+    private TextButton speedButton;
+    private TextButton seekBackButton;
+    private TextButton seekForwardButton;
+    private Slider timeline;
+    private Label timelineLabel;
+    private BaseDialog speedDialog;
+    private boolean updatingTimeline;
 
     public ReplayHud(ReplayMod mod, ReplayController controller) {
         this.mod = mod;
@@ -27,6 +43,7 @@ public class ReplayHud {
 
             dialog = new ReplayDialog(mod, controller);
             Vars.ui.menufrag.addButton(arc.Core.bundle.get("replaymod.open"), Icon.play, this::open);
+            addPlaybackControls();
             Element skipWave = arc.Core.scene.find("skip");
             if (skipWave != null) {
                 skipWave.addCaptureListener(new InputListener() {
@@ -116,6 +133,104 @@ public class ReplayHud {
                 }
             });
         });
+    }
+
+    /** Adds playback controls directly to the game HUD. */
+    private void addPlaybackControls() {
+        playbackControls = new Table();
+        playbackControls.defaults().size(140f, 48f).pad(3f);
+        pauseButton = playbackControls.button("", Icon.pause, this::togglePause).get();
+        TextButton stopButton = playbackControls.button(
+            Core.bundle.get("replaymod.stop"), Icon.cancel, this::stopPlayback
+        ).get();
+        seekBackButton = playbackControls.button(
+            Core.bundle.get("replaymod.seek.back"), Icon.left, () -> seekBy(-600L)
+        ).get();
+        seekForwardButton = playbackControls.button(
+            Core.bundle.get("replaymod.seek.forward"), Icon.right, () -> seekBy(600L)
+        ).get();
+        speedButton = playbackControls.button("", Icon.add, this::showSpeedOptions).get();
+        playbackControls.row();
+        timelineLabel = playbackControls.add("0:00 / 0:00").left().pad(3f).get();
+        timeline = new Slider(0f, 1f, 1f, false);
+        playbackControls.add(timeline).colspan(4).growX().height(28f).pad(3f);
+        timeline.changed(() -> {
+            if (!updatingTimeline && !timeline.isDragging()) {
+                controller.seek(Math.round(timeline.getValue()));
+            }
+        });
+        playbackControls.setSize(760f, 112f);
+        playbackControls.setPosition(0f, 12f);
+        playbackControls.visible(() -> controller.isPlaying());
+        playbackControls.update(() -> {
+            playbackControls.setPosition(
+                Math.max(0f, (Vars.ui.hudGroup.getWidth() - playbackControls.getWidth()) / 2f),
+                12f
+            );
+            boolean playing = controller.isPlaying();
+            pauseButton.setDisabled(!playing);
+            pauseButton.setText(Core.bundle.get(controller.isPlaybackPaused()
+                ? "replaymod.resume"
+                : "replaymod.pause"));
+            stopButton.setDisabled(!playing);
+            seekBackButton.setDisabled(!playing || controller.currentTick() <= 0L);
+            seekForwardButton.setDisabled(!playing ||
+                controller.currentTick() >= controller.durationTicks());
+            speedButton.setDisabled(!playing);
+            speedButton.setText(Core.bundle.format("replaymod.speed.current", controller.playbackSpeed()));
+            long duration = controller.durationTicks();
+            timeline.setRange(0f, Math.max(1L, duration));
+            timeline.setDisabled(!playing || duration <= 0L || controller.isSeeking());
+            if (!timeline.isDragging()) {
+                updatingTimeline = true;
+                timeline.setValue(Math.min(controller.currentTick(), Math.max(1L, duration)));
+                updatingTimeline = false;
+            }
+            timelineLabel.setText(formatTime(controller.currentTick()) + " / " + formatTime(duration));
+        });
+        Vars.ui.hudGroup.addChild(playbackControls);
+        speedDialog = createSpeedDialog();
+    }
+
+    private BaseDialog createSpeedDialog() {
+        BaseDialog dialog = new BaseDialog(Core.bundle.get("replaymod.speed"));
+        dialog.cont.button(Core.bundle.get("replaymod.speed.normal"), () -> {
+            controller.setPlaybackSpeed(1);
+            dialog.hide();
+        }).width(220f).height(48f).row();
+        for (int speed : new int[]{2, 3, 5, 10}) {
+            dialog.cont.button(Core.bundle.format("replaymod.speed.choice", speed), () -> {
+                controller.setPlaybackSpeed(speed);
+                dialog.hide();
+            }).width(220f).height(48f).row();
+        }
+        dialog.addCloseButton();
+        return dialog;
+    }
+
+    private void togglePause() {
+        controller.setPlaybackPaused(!controller.isPlaybackPaused());
+    }
+
+    private void showSpeedOptions() {
+        if (controller.isPlaying()) speedDialog.show();
+    }
+
+    private void seekBy(long ticks) {
+        controller.seek(controller.currentTick() + ticks);
+    }
+
+    private void stopPlayback() {
+        try {
+            controller.stop();
+        } catch (IOException | RuntimeException e) {
+            Log.err("Could not stop replay playback", e);
+        }
+    }
+
+    private String formatTime(long ticks) {
+        long seconds = ticks / 60L;
+        return (seconds / 60L) + ":" + String.format(java.util.Locale.ROOT, "%02d", seconds % 60L);
     }
 
     /** Opens replay controls; the replay input handler remains active underneath. */

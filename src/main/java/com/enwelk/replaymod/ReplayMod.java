@@ -10,7 +10,7 @@ import arc.util.Log;
 import arc.util.serialization.Jval;
 import mindustry.Vars;
 import mindustry.game.EventType.DisposeEvent;
-import mindustry.game.EventType.WorldLoadEvent;
+import mindustry.game.EventType.PlayEvent;
 import mindustry.mod.Mod;
 import mindustry.mod.Mods.LoadedMod;
 
@@ -30,7 +30,7 @@ public class ReplayMod extends Mod {
         loadMetadataSettings();
         loadConfiguration();
         replayHud.load();
-        Events.on(WorldLoadEvent.class, event -> showIntro());
+        Events.on(PlayEvent.class, event -> showIntro());
         Events.on(DisposeEvent.class, event -> {
             if (!controller.isActive()) return;
             try {
@@ -45,7 +45,8 @@ public class ReplayMod extends Mod {
     private void showIntro() {
         if (IntroDialog.isDismissed()) return;
         Core.app.post(() -> {
-            if (Core.scene == null || Vars.state == null || !Vars.state.isGame()) return;
+            if (Core.scene == null || Vars.state == null || !Vars.state.isGame() ||
+                controller.isPlaying()) return;
             if (introDialog == null) {
                 introDialog = new IntroDialog();
             }

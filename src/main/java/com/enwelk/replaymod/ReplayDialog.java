@@ -13,7 +13,6 @@ import arc.files.Fi;
 import arc.scene.ui.CheckBox;
 import arc.scene.ui.Label;
 import arc.scene.ui.ScrollPane;
-import arc.scene.ui.Slider;
 import arc.scene.ui.TextButton;
 import arc.scene.ui.layout.Table;
 import arc.util.Log;
@@ -28,26 +27,16 @@ public class ReplayDialog extends BaseDialog {
     private final ReplayMod mod;
     private final ReplayController controller;
     private final Table replayList = new Table();
-    private final Table playbackControls = new Table();
     private final Label status;
     private final TextButton recordButton;
     private final TextButton playButton;
-    private final TextButton pauseButton;
-    private final TextButton stopButton;
-    private final TextButton speedButton;
-    private final TextButton seekBackButton;
-    private final TextButton seekForwardButton;
-    private final Slider timeline;
-    private final Label timelineLabel;
+    private final TextButton stopRecordingButton;
     private final TextButton deleteButton;
     private final TextButton exportButton;
     private final TextButton exportAllButton;
     private final CheckBox compressExport;
     private final arc.scene.ui.TextField nameField;
-    private final BaseDialog speedDialog;
     private final BaseDialog endDialog;
-    private boolean updatingTimeline;
-    private long pendingTimelineTick;
 
     private Fi selectedReplay;
     private String statusText = "";
@@ -58,7 +47,6 @@ public class ReplayDialog extends BaseDialog {
         super(Core.bundle.get("replaymod.title"));
         this.mod = mod;
         this.controller = controller;
-        speedDialog = createSpeedDialog();
         endDialog = createEndDialog();
         controller.setPlaybackFinishedListener(this::showPlaybackEnded);
 
@@ -68,37 +56,7 @@ public class ReplayDialog extends BaseDialog {
         status = cont.add("").left().growX().pad(6f).get();
         cont.row();
 
-        playbackControls.defaults().size(256f, 52f).pad(4f);
-        pauseButton = playbackControls.button(
-            Core.bundle.get("replaymod.pause"), Icon.pause, this::togglePause
-        ).get();
-        stopButton = playbackControls.button(
-            Core.bundle.get("replaymod.stop"), Icon.cancel, this::stop
-        ).get();
-        playbackControls.row();
-        seekBackButton = playbackControls.button(
-            Core.bundle.get("replaymod.seek.back"), Icon.left, () -> seekBy(-600L)
-        ).get();
-        seekForwardButton = playbackControls.button(
-            Core.bundle.get("replaymod.seek.forward"), Icon.right, () -> seekBy(600L)
-        ).get();
-        playbackControls.row();
-        speedButton = playbackControls.button("", Icon.add, this::showSpeedOptions).get();
-        timelineLabel = playbackControls.add("0:00 / 0:00").left().pad(4f).get();
-        playbackControls.row();
-        timeline = new Slider(0f, 1f, 1f, false);
-        playbackControls.add(timeline).colspan(2).growX().height(32f).pad(8f);
-        playbackControls.row();
-        timeline.changed(() -> {
-            if (updatingTimeline) return;
-            pendingTimelineTick = Math.round(timeline.getValue());
-            if (!timeline.isDragging()) controller.seek(pendingTimelineTick);
-        });
-        cont.add(playbackControls).growX();
-        playbackControls.visible(() -> controller.isPlaying());
-        cont.row();
-
-                Table controls = cont.table().growX().get();
+        Table controls = cont.table().growX().get();
         controls.defaults()
             .size(256f, 52f)
             .pad(4f)
@@ -110,6 +68,10 @@ public class ReplayDialog extends BaseDialog {
         playButton = controls.button(
             Core.bundle.get("replaymod.play"), Icon.play, this::play
         ).get();
+        controls.row();
+        stopRecordingButton = controls.button(
+            Core.bundle.get("replaymod.stop"), Icon.cancel, this::stop
+        ).colspan(2).visible(() -> controller.isRecording()).get();
         controls.row();
 
         deleteButton = controls.button(
@@ -156,24 +118,7 @@ public class ReplayDialog extends BaseDialog {
             status.setText(statusText());
             recordButton.setDisabled(controller.isActive() || !canRecord());
             playButton.setDisabled(controller.isActive() || selectedReplay == null || Vars.net.active());
-            pauseButton.setText(controller.isPlaybackPaused()
-                ? Core.bundle.get("replaymod.resume")
-                : Core.bundle.get("replaymod.pause"));
-            stopButton.setDisabled(!controller.isActive());
-            boolean playing = controller.isPlaying();
-            pauseButton.setDisabled(!playing);
-            speedButton.setDisabled(!playing);
-            seekBackButton.setDisabled(!playing || controller.currentTick() <= 0L);
-            seekForwardButton.setDisabled(!playing ||
-                controller.currentTick() >= controller.durationTicks());
-            long duration = controller.durationTicks();
-            timeline.setRange(0f, Math.max(1L, duration));
-            updatingTimeline = true;
-            timeline.setValue(Math.min(controller.currentTick(), Math.max(1L, duration)));
-            updatingTimeline = false;
-            timeline.setDisabled(!playing || duration <= 0L || controller.isSeeking());
-            timelineLabel.setText(formatTime(controller.currentTick()) + " / " + formatTime(duration));
-            speedButton.setText(Core.bundle.format("replaymod.speed.current", controller.playbackSpeed()));
+            stopRecordingButton.setDisabled(!controller.isRecording());
             deleteButton.setDisabled(selectedReplay == null);
             exportButton.setDisabled(selectedReplay == null);
             exportAllButton.setDisabled(!hasReplays);
@@ -238,33 +183,6 @@ public class ReplayDialog extends BaseDialog {
         }
     }
 
-    /** Pauses or resumes the active replay. */
-    private void togglePause() {
-        controller.setPlaybackPaused(!controller.isPlaybackPaused());
-    }
-
-    /** Opens a dropdown-style list of replay speed multipliers. */
-    private void showSpeedOptions() {
-        if (controller.isPlaying()) speedDialog.show();
-    }
-
-    /** Creates the replay speed selection popup. */
-    private BaseDialog createSpeedDialog() {
-        BaseDialog dialog = new BaseDialog(Core.bundle.get("replaymod.speed"));
-        dialog.cont.button(Core.bundle.get("replaymod.speed.normal"), () -> {
-            controller.setPlaybackSpeed(1);
-            dialog.hide();
-        }).width(220f).height(48f).row();
-        for (int speed : new int[]{2, 3, 5, 10}) {
-            dialog.cont.button(Core.bundle.format("replaymod.speed.choice", speed), () -> {
-                controller.setPlaybackSpeed(speed);
-                dialog.hide();
-            }).width(220f).height(48f).row();
-        }
-        dialog.addCloseButton();
-        return dialog;
-    }
-
     /** Creates the end-of-playback screen. */
     private BaseDialog createEndDialog() {
         BaseDialog dialog = new BaseDialog(Core.bundle.get("replaymod.finished.title"));
@@ -286,17 +204,6 @@ public class ReplayDialog extends BaseDialog {
         statusText = Core.bundle.get("replaymod.status.finished");
         refresh();
         endDialog.show();
-    }
-
-    /** Seeks relative to the current replay position. */
-    private void seekBy(long ticks) {
-        controller.seek(controller.currentTick() + ticks);
-    }
-
-    /** Formats replay ticks as minutes and seconds. */
-    private String formatTime(long ticks) {
-        long seconds = ticks / 60L;
-        return (seconds / 60L) + ":" + String.format(java.util.Locale.ROOT, "%02d", seconds % 60L);
     }
 
     /** Stops recording or playback. */
