@@ -8,6 +8,8 @@ import java.nio.ByteOrder;
 import java.nio.channels.FileChannel;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.List;
 
 import arc.util.io.FastDeflaterOutputStream;
@@ -66,6 +68,41 @@ public class RepWriter implements Closeable {
 
         writeFully(header);
         writeFully(ByteBuffer.wrap(saveData));
+        writeModMetadata();
+    }
+
+    private void writeModMetadata() throws IOException {
+        List<String> mods = new ArrayList<>();
+        Vars.mods.list().each(mod -> {
+            if (mod.enabled()) {
+                String version = mod.meta.version == null ? "" : mod.meta.version;
+                mods.add(mod.name + "@" + version);
+            }
+        });
+        mods.sort(String::compareTo);
+
+        int size = 8;
+        List<byte[]> encodedMods = new ArrayList<>(mods.size());
+        for (String mod : mods) {
+            byte[] encoded = mod.getBytes(StandardCharsets.UTF_8);
+            if (encoded.length == 0 || encoded.length > 512) {
+                throw new IOException("Invalid mod identifier in active mod list");
+            }
+            size = Math.addExact(size, Integer.BYTES + encoded.length);
+            encodedMods.add(encoded);
+        }
+        if (size > 1024 * 1024) {
+            throw new IOException("Active mod metadata is too large");
+        }
+
+        ByteBuffer metadata = ByteBuffer.allocate(size).order(ByteOrder.LITTLE_ENDIAN);
+        metadata.put((byte)'M').put((byte)'O').put((byte)'D').put((byte)'S');
+        metadata.putInt(encodedMods.size());
+        for (byte[] encoded : encodedMods) {
+            metadata.putInt(encoded.length).put(encoded);
+        }
+        metadata.flip();
+        writeFully(metadata);
     }
 
     public void writeTickPacket(long tick, float movementX, float movementY,

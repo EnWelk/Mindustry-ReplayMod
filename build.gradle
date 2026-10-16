@@ -3,7 +3,7 @@ plugins {
 }
 
 group = 'com.enwelk'
-version = '3.1'
+version = '0.3.2'
 
 base {
     archivesName = 'ReplayMod'

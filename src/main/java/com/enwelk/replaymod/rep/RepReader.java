@@ -6,26 +6,31 @@ import java.io.OutputStream;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.channels.FileChannel;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.List;
 
-import arc.files.Fi;
-import arc.util.io.FastDeflaterOutputStream;
 import com.enwelk.replaymod.Action;
 import com.enwelk.replaymod.ReplayMod;
+
+import arc.files.Fi;
+import arc.util.io.FastDeflaterOutputStream;
 import mindustry.io.SaveIO;
 
 public class RepReader implements Closeable {
     private static final int MAX_MAP_SIZE = 256 * 1024 * 1024;
     private static final int MAX_RECORD_SIZE = 64 * 1024 * 1024;
+    private static final int MAX_MOD_METADATA_SIZE = 1024 * 1024;
+    private static final int MAX_MOD_COUNT = 4096;
 
     private final FileChannel channel;
     private final Path filePath;
     private final ByteBuffer inputBuffer = ByteBuffer.allocate(64 * 1024);
     private final float version;
+    private List<String> usedMods = List.of();
     private long recordsStart;
     private long firstTick = Long.MAX_VALUE;
     private long endTick;
@@ -50,6 +55,36 @@ public class RepReader implements Closeable {
         return version;
     }
 
+    public List<String> usedMods() {
+        return usedMods;
+    }
+
+    /** Reads replay mod metadata without loading the embedded save into the active world. */
+    public static List<String> readUsedMods(Path filePath) throws IOException {
+        try (FileChannel file = FileChannel.open(filePath, StandardOpenOption.READ)) {
+            ByteBuffer header = ByteBuffer.allocate(3 + Float.BYTES + Integer.BYTES)
+                .order(ByteOrder.LITTLE_ENDIAN);
+            readChannelFully(file, header);
+            header.flip();
+            if (header.get() != 'R' || header.get() != 'E' || header.get() != 'P') {
+                throw new IOException("Invalid replay header");
+            }
+            float version = header.getFloat();
+            int mapSize = header.getInt();
+            if (mapSize <= 0 || mapSize > MAX_MAP_SIZE ||
+                file.size() < 3L + Float.BYTES + Integer.BYTES + mapSize) {
+                throw new IOException("Invalid replay map size");
+            }
+            if (Float.compare(version, 3f) < 0) return List.of();
+            if (Float.compare(version, 3f) > 0) {
+                throw new IOException("Unsupported replay version: " + version);
+            }
+
+            file.position(3L + Float.BYTES + Integer.BYTES + mapSize);
+            return readModMetadata(file);
+        }
+    }
+
     /** Validates an import's framing without loading its embedded map into the active world. */
     public static void validateForImport(Path filePath) throws IOException {
         try (FileChannel file = FileChannel.open(filePath, StandardOpenOption.READ)) {
@@ -63,13 +98,17 @@ public class RepReader implements Closeable {
                 throw new IOException("Invalid replay header");
             }
             float version = header.getFloat();
-            if (Float.compare(version, ReplayMod.replayVersion()) != 0 && Float.compare(version, 1f) != 0) {
+            if (!isSupportedVersion(version)) {
                 throw new IOException("Unsupported replay version: " + version);
             }
             int mapSize = header.getInt();
             if (mapSize <= 0 || mapSize > MAX_MAP_SIZE ||
                 file.size() < 3L + Float.BYTES + Integer.BYTES + mapSize + 1L + Integer.BYTES + Long.BYTES) {
                 throw new IOException("Invalid or truncated replay map data");
+            }
+            if (Float.compare(version, 3f) >= 0) {
+                file.position(3L + Float.BYTES + Integer.BYTES + mapSize);
+                readModMetadata(file);
             }
         }
     }
@@ -80,17 +119,26 @@ public class RepReader implements Closeable {
         firstTick = Long.MAX_VALUE;
         endTick = 0L;
         boolean foundEnd = false;
+
         ReplayRecord record;
         while ((record = readNext()) != null) {
-            firstTick = Math.min(firstTick, record.tick());
             if (record instanceof EndRecord end) {
                 endTick = end.tick();
                 foundEnd = true;
                 break;
             }
+            firstTick = Math.min(firstTick, record.tick());
+            endTick = Math.max(endTick, record.tick());
         }
-        if (!foundEnd) throw new IOException("Replay is missing its end record");
-        if (firstTick == Long.MAX_VALUE) firstTick = 0L;
+        if (!foundEnd) {
+            throw new IOException("Replay is missing its end record");
+        }
+        if (firstTick == Long.MAX_VALUE) {
+            firstTick = 0L;
+        }
+        if (endTick < firstTick) {
+            throw new IOException("Invalid replay timeline");
+        }
         resetRecords();
     }
 
@@ -122,8 +170,7 @@ public class RepReader implements Closeable {
         }
 
         float fileVersion = header.getFloat();
-        if (Float.compare(fileVersion, ReplayMod.replayVersion()) != 0 &&
-            Float.compare(fileVersion, 1f) != 0) {
+        if (!isSupportedVersion(fileVersion)) {
             throw new IOException("Unsupported replay version: " + fileVersion);
         }
 
@@ -134,6 +181,9 @@ public class RepReader implements Closeable {
 
         byte[] mapData = new byte[mapDataSize];
         readFully(ByteBuffer.wrap(mapData), false);
+        if (Float.compare(fileVersion, 3f) >= 0) {
+            usedMods = readModMetadata();
+        }
         Path tempPath = Files.createTempFile("replay-map", ".msav");
         try {
             if (isUncompressedSave(mapData)) {
@@ -149,6 +199,81 @@ public class RepReader implements Closeable {
         }
         recordsStart = channel.position() - inputBuffer.remaining();
         return fileVersion;
+    }
+
+    private List<String> readModMetadata() throws IOException {
+        ByteBuffer metadataHeader = ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN);
+        readFully(metadataHeader, false);
+        metadataHeader.flip();
+        if (metadataHeader.get() != 'M' || metadataHeader.get() != 'O' ||
+            metadataHeader.get() != 'D' || metadataHeader.get() != 'S') {
+            throw new IOException("Invalid replay mod metadata header");
+        }
+        return readModNames(metadataHeader.getInt(), this::readMetadataBytes);
+    }
+
+    private byte[] readMetadataBytes(int size) throws IOException {
+        ByteBuffer data = ByteBuffer.allocate(size);
+        readFully(data, false);
+        return data.array();
+    }
+
+    private static List<String> readModMetadata(FileChannel file) throws IOException {
+        ByteBuffer metadataHeader = ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN);
+        readChannelFully(file, metadataHeader);
+        metadataHeader.flip();
+        if (metadataHeader.get() != 'M' || metadataHeader.get() != 'O' ||
+            metadataHeader.get() != 'D' || metadataHeader.get() != 'S') {
+            throw new IOException("Invalid replay mod metadata header");
+        }
+        return readModNames(metadataHeader.getInt(), size -> {
+            ByteBuffer data = ByteBuffer.allocate(size);
+            readChannelFully(file, data);
+            return data.array();
+        });
+    }
+
+    private static List<String> readModNames(int count, MetadataReader reader) throws IOException {
+        if (count < 0 || count > MAX_MOD_COUNT) {
+            throw new IOException("Invalid replay mod count: " + count);
+        }
+        List<String> mods = new ArrayList<>(count);
+        int totalSize = 8;
+        for (int i = 0; i < count; i++) {
+            ByteBuffer length = ByteBuffer.allocate(Integer.BYTES).order(ByteOrder.LITTLE_ENDIAN);
+            reader.readFully(length);
+            length.flip();
+            int size = length.getInt();
+            if (size <= 0 || size > 512) {
+                throw new IOException("Invalid replay mod metadata size");
+            }
+            totalSize = Math.addExact(totalSize, Integer.BYTES + size);
+            if (totalSize > MAX_MOD_METADATA_SIZE) {
+                throw new IOException("Replay mod metadata is too large");
+            }
+            mods.add(new String(reader.readBytes(size), StandardCharsets.UTF_8));
+        }
+        return List.copyOf(mods);
+    }
+
+    private static boolean isSupportedVersion(float version) {
+        return Float.compare(version, ReplayMod.replayVersion()) == 0 ||
+            Float.compare(version, 1f) == 0 ||
+            Float.compare(version, 2f) == 0;
+    }
+
+    private static void readChannelFully(FileChannel channel, ByteBuffer buffer) throws IOException {
+        while (buffer.hasRemaining()) {
+            if (channel.read(buffer) < 0) throw new IOException("Replay file is truncated");
+        }
+    }
+
+    private interface MetadataReader {
+        byte[] readBytes(int size) throws IOException;
+
+        default void readFully(ByteBuffer buffer) throws IOException {
+            buffer.put(readBytes(buffer.remaining()));
+        }
     }
 
     private boolean isUncompressedSave(byte[] data) {

@@ -30,7 +30,6 @@ public class ReplayHud {
     private Slider timeline;
     private Label timelineLabel;
     private BaseDialog speedDialog;
-    private boolean updatingTimeline;
 
     public ReplayHud(ReplayMod mod, ReplayController controller) {
         this.mod = mod;
@@ -154,9 +153,12 @@ public class ReplayHud {
         timelineLabel = playbackControls.add("0:00 / 0:00").left().pad(3f).get();
         timeline = new Slider(0f, 1f, 1f, false);
         playbackControls.add(timeline).colspan(4).growX().height(28f).pad(3f);
-        timeline.changed(() -> {
-            if (!updatingTimeline && !timeline.isDragging()) {
-                controller.seek(Math.round(timeline.getValue()));
+        timeline.addListener(new InputListener() {
+            @Override
+            public void touchUp(InputEvent event, float x, float y, int pointer, KeyCode key) {
+                if (controller.isPlaying()) {
+                    controller.seek(Math.round(timeline.getValue()));
+                }
             }
         });
         playbackControls.setSize(760f, 112f);
@@ -182,9 +184,7 @@ public class ReplayHud {
             timeline.setRange(0f, Math.max(1L, duration));
             timeline.setDisabled(!playing || duration <= 0L || controller.isSeeking());
             if (!timeline.isDragging()) {
-                updatingTimeline = true;
                 timeline.setValue(Math.min(controller.currentTick(), Math.max(1L, duration)));
-                updatingTimeline = false;
             }
             timelineLabel.setText(formatTime(controller.currentTick()) + " / " + formatTime(duration));
         });
@@ -217,12 +217,13 @@ public class ReplayHud {
     }
 
     private void seekBy(long ticks) {
-        controller.seek(controller.currentTick() + ticks);
+        long target = Math.max(0L, Math.min(controller.currentTick() + ticks, controller.durationTicks()));
+        controller.seek(target);
     }
 
     private void stopPlayback() {
         try {
-            controller.stop();
+            controller.stopPlaybackManually();
         } catch (IOException | RuntimeException e) {
             Log.err("Could not stop replay playback", e);
         }

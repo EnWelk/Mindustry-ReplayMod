@@ -5,13 +5,21 @@ For manual builds, replace mindustryDir and arcDir with the actual paths.
 Replay format .rep
 
 TODO:
+- Fix timeline
+- Optimize rewind
 - Fix some bag in map after replay
 - Record and replay complete multiplayer sessions, including actions from every player and server-authoritative world changes.
 
 Change log:
-  - v3.1
+  - v0.3.2
+    - Fix timeline
+    - Fix +10 seconds button
+    - Added dialog after stopping replay
+    - Added mod list to replay files and compatibility warning before playback
+    - Added json, simple js/java mods compatibility
+  - v0.3.1
     - Ui update
-    - Fix rewind
+    - Fix timeline
     - Fix replay pause bag
     - Fix replay timeline bag
   - v0.3

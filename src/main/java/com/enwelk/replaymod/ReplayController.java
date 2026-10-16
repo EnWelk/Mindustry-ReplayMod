@@ -6,12 +6,15 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 
+import com.enwelk.replaymod.rep.RepReader;
+import com.enwelk.replaymod.rep.RepWriter;
+
 import arc.Core;
-import arc.input.KeyCode;
 import arc.input.KeyBind.Axis;
+import arc.input.KeyCode;
 import arc.math.Mathf;
-import arc.util.Log;
 import arc.math.geom.Vec2;
+import arc.util.Log;
 import arc.util.Time;
 import arc.util.io.Reads;
 import arc.util.serialization.Jval;
@@ -24,15 +27,13 @@ import mindustry.gen.Groups;
 import mindustry.gen.Mechc;
 import mindustry.gen.Player;
 import mindustry.gen.Unit;
-import mindustry.input.DesktopInput;
 import mindustry.input.Binding;
+import mindustry.input.DesktopInput;
 import mindustry.input.InputHandler;
 import mindustry.input.PlaceMode;
 import mindustry.io.TypeIO;
 import mindustry.world.Block;
 import mindustry.world.Tile;
-import com.enwelk.replaymod.rep.RepReader;
-import com.enwelk.replaymod.rep.RepWriter;
 
 public class ReplayController {
     private static final long MAX_SEEK_STEP = 60L;
@@ -55,6 +56,7 @@ public class ReplayController {
     private int playbackSpeed = 1;
     private Axis previousSkipWaveBinding;
     private Runnable playbackFinished = () -> {};
+    private Runnable playbackStopped = () -> {};
 
     public void startRecording(Path path) throws IOException {
         ensureIdle();
@@ -116,6 +118,16 @@ public class ReplayController {
         playbackFinished = listener == null ? () -> {} : listener;
     }
 
+    public void setPlaybackStoppedListener(Runnable listener) {
+        playbackStopped = listener == null ? () -> {} : listener;
+    }
+
+    public void stopPlaybackManually() throws IOException {
+        if (reader == null) return;
+        stopPlayback();
+        playbackStopped.run();
+    }
+
     /** Sets the simulation multiplier used while playback is running. */
     public void setPlaybackSpeed(int speed) {
         if (speed != 1 && speed != 2 && speed != 3 && speed != 5 && speed != 10) {
@@ -130,6 +142,7 @@ public class ReplayController {
         if (reader == null) return;
         long target = Math.max(0L, Math.min(targetTick, durationTicks));
         pauseAfterSeek = isPlaybackPaused();
+        if (target == currentTick && seekTarget < 0L) return;
         if (target < currentTick) {
             try {
                 restartPlayback();
@@ -139,47 +152,65 @@ public class ReplayController {
             }
             if (reader == null) return;
         }
-        if (target == currentTick) return;
         seekTarget = target;
         playbackPaused = false;
-        if (Vars.state != null) Vars.state.set(GameState.State.playing);
+        if (Vars.state != null) {
+            Vars.state.set(GameState.State.playing);
+        }
     }
 
-    /** Advances a bounded batch of simulation time toward the seek target. */
     void advanceSeek() {
         if (reader == null || seekTarget < 0L || Vars.state == null) return;
         long target = seekTarget;
         try {
             int updates = 0;
-            while (reader != null && currentTick < target && updates < MAX_SEEK_UPDATES_PER_FRAME) {
+            while (reader != null && currentTick < target &&
+                updates < MAX_SEEK_UPDATES_PER_FRAME) {
                 long replayTick = playbackOrigin + currentTick;
                 if (nextRecord != null && nextRecord.tick() <= replayTick) {
                     updatePlayback();
                     if (reader == null) return;
                     continue;
                 }
-
                 long step = Math.min(MAX_SEEK_STEP, target - currentTick);
                 if (nextRecord != null) {
-                    step = Math.min(step, Math.max(1L, nextRecord.tick() - replayTick));
+                    long untilRecord = nextRecord.tick() - replayTick;
+                    if (untilRecord > 0L) {
+                        step = Math.min(step, untilRecord);
+                    }
                 }
                 double before = Vars.state.tick;
-                long simulationStep = step;
+                long simulationStep = Math.max(1L, step);
                 Time.setDeltaProvider(() -> simulationStep);
                 Vars.logic.update();
                 if (reader == null) return;
-                Vars.state.tick = before + step;
+                Vars.state.tick = before + simulationStep;
                 currentTick = (long)Math.floor(Vars.state.tick);
                 updatePlayback();
                 updates++;
             }
         } finally {
             if (reader != null) {
-                seekTarget = -1L;
                 installPlaybackTimeScale();
-                playbackPaused = pauseAfterSeek;
-                if (playbackPaused) Vars.state.set(GameState.State.paused);
+
+                if (currentTick >= target) {
+                    seekTarget = -1L;
+                    playbackPaused = pauseAfterSeek;
+
+                    if (playbackPaused) {
+                        Vars.state.set(GameState.State.paused);
+                    }
+                }
             }
+        }
+    }
+
+    private void completeSeek() {
+        seekTarget = -1L;
+        installPlaybackTimeScale();
+        playbackPaused = pauseAfterSeek;
+        if (playbackPaused && Vars.state != null) {
+            Vars.state.set(GameState.State.paused);
         }
     }
 

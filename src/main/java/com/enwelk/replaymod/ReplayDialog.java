@@ -5,6 +5,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.Arrays;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
 
 import com.enwelk.replaymod.rep.RepReader;
 
@@ -37,6 +40,7 @@ public class ReplayDialog extends BaseDialog {
     private final CheckBox compressExport;
     private final arc.scene.ui.TextField nameField;
     private final BaseDialog endDialog;
+    private Label endMessage;
 
     private Fi selectedReplay;
     private String statusText = "";
@@ -49,6 +53,7 @@ public class ReplayDialog extends BaseDialog {
         this.controller = controller;
         endDialog = createEndDialog();
         controller.setPlaybackFinishedListener(this::showPlaybackEnded);
+        controller.setPlaybackStoppedListener(this::showPlaybackStopped);
 
         cont.margin(12f);
         cont.add(Core.bundle.get("replaymod.name")).left().padRight(8f);
@@ -175,9 +180,13 @@ public class ReplayDialog extends BaseDialog {
     private void play() {
         if (selectedReplay == null) return;
         try {
-            controller.startPlayback(selectedReplay.file().toPath());
-            statusText = "";
-            hide();
+            Path path = selectedReplay.file().toPath();
+            List<String> usedMods = RepReader.readUsedMods(path);
+            if (usedMods.isEmpty()) {
+                startPlayback(path);
+            } else {
+                showModWarning(path, usedMods);
+            }
         } catch (IOException | RuntimeException e) {
             reportFailure("replaymod.error.play", e);
         }
@@ -186,7 +195,7 @@ public class ReplayDialog extends BaseDialog {
     /** Creates the end-of-playback screen. */
     private BaseDialog createEndDialog() {
         BaseDialog dialog = new BaseDialog(Core.bundle.get("replaymod.finished.title"));
-        dialog.cont.add(Core.bundle.get("replaymod.finished.message")).pad(12f);
+        endMessage = dialog.cont.add(Core.bundle.get("replaymod.finished.message")).pad(12f).get();
         dialog.buttons.button(Core.bundle.get("replaymod.finished.replayAgain"), Icon.play, () -> {
             dialog.hide();
             play();
@@ -202,8 +211,51 @@ public class ReplayDialog extends BaseDialog {
     /** Shows the completion screen and refreshes replay controls. */
     private void showPlaybackEnded() {
         statusText = Core.bundle.get("replaymod.status.finished");
+        if (endMessage != null) endMessage.setText(Core.bundle.get("replaymod.finished.message"));
         refresh();
         endDialog.show();
+    }
+
+    private void showPlaybackStopped() {
+        statusText = Core.bundle.get("replaymod.status.stopped");
+        if (endMessage != null) endMessage.setText(Core.bundle.get("replaymod.stopped.message"));
+        refresh();
+        endDialog.show();
+    }
+
+    private void startPlayback(Path path) {
+        try {
+            controller.startPlayback(path);
+            statusText = "";
+            hide();
+        } catch (IOException | RuntimeException e) {
+            reportFailure("replaymod.error.play", e);
+        }
+    }
+
+    private void showModWarning(Path path, List<String> usedMods) {
+        Set<String> installedMods = new HashSet<>();
+        Vars.mods.list().each(loaded -> {
+            if (loaded.enabled()) {
+                String version = loaded.meta.version == null ? "" : loaded.meta.version;
+                installedMods.add(loaded.name + "@" + version);
+            }
+        });
+        List<String> missingMods = usedMods.stream()
+            .filter(required -> !installedMods.contains(required))
+            .toList();
+        String message = Core.bundle.format(
+            "replaymod.mods.warning.message",
+            String.join("\n", usedMods),
+            missingMods.isEmpty()
+                ? Core.bundle.get("replaymod.mods.warning.noneMissing")
+                : String.join("\n", missingMods)
+        );
+        Vars.ui.showConfirm(
+            Core.bundle.get("replaymod.mods.warning.title"),
+            message,
+            () -> startPlayback(path)
+        );
     }
 
     /** Stops recording or playback. */
