@@ -3,7 +3,7 @@ plugins {
 }
 
 group = 'com.enwelk'
-version = '0.2'
+version = '0.2.1'
 
 base {
     archivesName = 'ReplayMod'
@@ -27,6 +27,11 @@ if (!arcDir.isDirectory()) {
 repositories {
     mavenCentral()
     maven { url = 'https://www.jitpack.io' }
+    maven { url = 'https://dl.google.com/dl/android/maven2/' }
+}
+
+configurations {
+    androidDex
 }
 
 dependencies {
@@ -44,6 +49,8 @@ dependencies {
     if (arcJar.exists()) {
         compileOnly files(arcJar)
     }
+
+    androidDex 'com.android.tools:r8:8.3.37'
 }
 
 java {
@@ -54,4 +61,87 @@ java {
 
 tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8'
+}
+
+def androidSdkDir = providers.gradleProperty('androidSdkDir')
+    .orElse(providers.environmentVariable('ANDROID_HOME'))
+    .orElse(providers.environmentVariable('ANDROID_SDK_ROOT'))
+    .orElse(providers.provider {
+        def localProperties = file('local.properties')
+        if (localProperties.exists()) {
+            def properties = new Properties()
+            localProperties.withInputStream { properties.load(it) }
+            def sdkDir = properties.getProperty('sdk.dir')
+            if (sdkDir) return sdkDir
+        }
+
+        def userHome = System.getProperty('user.home')
+        def os = System.getProperty('os.name').toLowerCase(Locale.ROOT)
+        if (os.contains('win')) return new File(userHome, 'AppData/Local/Android/Sdk').path
+        if (os.contains('mac')) return new File(userHome, 'Library/Android/sdk').path
+        return new File(userHome, 'Android/Sdk').path
+    })
+
+def androidPlatforms = providers.provider {
+    def platforms = new File(androidSdkDir.get(), 'platforms')
+    if (!platforms.isDirectory()) {
+        throw new GradleException(
+            "Android SDK platforms not found at ${platforms}. Set androidSdkDir or ANDROID_HOME."
+        )
+    }
+
+    def androidJar = platforms.listFiles()
+        .findAll { it.isDirectory() && it.name ==~ /android-\d+/ }
+        .sort { first, second ->
+            first.name.substring('android-'.length()).toInteger() <=>
+                second.name.substring('android-'.length()).toInteger()
+        }
+        .reverse()
+        .collect { new File(it, 'android.jar') }
+        .find { it.isFile() }
+
+    if (androidJar == null) {
+        throw new GradleException("No Android platform android.jar found under ${platforms}.")
+    }
+    return androidJar
+}
+
+def dexOutput = layout.buildDirectory.dir('generated/android-dex')
+
+tasks.register('modClassesJar', Jar) {
+    dependsOn tasks.named('classes')
+    archiveFileName = 'replaymod-classes.jar'
+    destinationDirectory = layout.buildDirectory.dir('intermediates')
+    from(sourceSets.main.output.classesDirs)
+}
+
+tasks.register('dexMod', JavaExec) {
+    dependsOn tasks.named('modClassesJar')
+    classpath = configurations.androidDex
+    mainClass = 'com.android.tools.r8.D8'
+    inputs.file(androidPlatforms)
+    inputs.file(layout.buildDirectory.file('intermediates/replaymod-classes.jar'))
+    inputs.file(new File(mindustryDir, 'core/build/libs/core-release.jar'))
+    inputs.file(new File(arcDir, 'arc-core/build/libs/arc-core-1.0.jar'))
+    outputs.file(dexOutput.map { it.file('classes.dex') })
+    doFirst {
+        def outputDirectory = dexOutput.get().asFile
+        delete(outputDirectory)
+        outputDirectory.mkdirs()
+
+        args = [
+            '--min-api', '21',
+            '--lib', androidPlatforms.get().absolutePath,
+            '--classpath', new File(mindustryDir, 'core/build/libs/core-release.jar').absolutePath,
+            '--classpath', new File(arcDir, 'arc-core/build/libs/arc-core-1.0.jar').absolutePath,
+            '--output', outputDirectory.absolutePath,
+            layout.buildDirectory.file('intermediates/replaymod-classes.jar').get().asFile.absolutePath
+        ]
+    }
+}
+
+tasks.named('jar') {
+    dependsOn tasks.named('dexMod')
+    from(dexOutput)
+    from('mod.hjson')
 }
