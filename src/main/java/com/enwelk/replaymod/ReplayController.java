@@ -138,6 +138,13 @@ public class ReplayController {
         playbackStopped.run();
     }
 
+    /** Stops replay playback before a newly started game can inherit its input handler. */
+    void stopPlaybackForNewGame() throws IOException {
+        if (reader != null) {
+            stopPlayback();
+        }
+    }
+
     /** Sets the simulation multiplier used while playback is running. */
     public void setPlaybackSpeed(int speed) {
         if (speed != 1 && speed != 2 && speed != 3 && speed != 5 && speed != 10) {
@@ -395,16 +402,19 @@ public class ReplayController {
     /** Applies the most recent recorded movement, aim, and player state. */
     private void applyLastTick() {
         if (lastTick == null || Vars.player == null || Vars.player.unit() == null) return;
-
         Player player = Vars.player;
         Unit unit = player.unit();
-        playbackInput.movement.set(lastTick.movementX(), lastTick.movementY());
-        unit.movePref(playbackInput.movement);
-        unit.aim(lastTick.aimX(), lastTick.aimY());
         player.shooting = lastTick.shooting();
         player.boosting = lastTick.boosting();
         boolean boosted = unit instanceof Mechc && unit.isFlying();
-        unit.controlWeapons(true, player.shooting && !boosted);
+        boolean aimAtTarget = unit.type.omniMovement && player.shooting &&
+            unit.type.hasWeapons() && unit.type.faceTarget && !boosted;
+        unit.lookAt(aimAtTarget
+            ? unit.angleTo(lastTick.aimX(), lastTick.aimY())
+            : unit.prefRotation());
+        playbackInput.movement.set(lastTick.movementX(), lastTick.movementY());
+        unit.movePref(playbackInput.movement);
+        unit.aim(lastTick.aimX(), lastTick.aimY(), true);
         if (lastTick.mineX() < 0 || lastTick.mineY() < 0) {
             unit.mineTile = null;
         } else {
@@ -412,6 +422,19 @@ public class ReplayController {
         }
         player.mouseX = lastTick.aimX();
         player.mouseY = lastTick.aimY();
+        maintainPlaybackWeapons();
+    }
+
+    /** Reapplies recorded weapon flags throughout each simulated game update. */
+    void maintainPlaybackWeapons() {
+        if (reader == null || lastTick == null ||
+            Vars.player == null || Vars.player.unit() == null) return;
+        Player player = Vars.player;
+        Unit unit = player.unit();
+        player.shooting = lastTick.shooting();
+        player.boosting = lastTick.boosting();
+        boolean boosted = unit instanceof Mechc && unit.isFlying();
+        unit.controlWeapons(true, lastTick.shooting() && !boosted);
     }
 
     /** Applies one recorded gameplay action to the active replay world. */

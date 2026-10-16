@@ -141,7 +141,8 @@ public class ReplayRecordInput extends DesktopInput implements AutoCloseable {
         float cameraY = arc.Core.camera.position.y;
         float cameraScale = Vars.renderer.getScale();
         long tick = (long)Math.floor(Vars.state.tick);
-        if (tick != lastInputTick && (!hasRecordedInput ||
+        if (tick != lastInputTick && (shouldRecordContinuousInput(tick, lastInputTick,
+            player.shooting, player.boosting) || !hasRecordedInput ||
             !movement.epsilonEquals(lastMovement, 0.001f) ||
             Math.abs(unit.aimX() - lastAimX) > 0.1f ||
             Math.abs(unit.aimY() - lastAimY) > 0.1f ||
@@ -178,6 +179,12 @@ public class ReplayRecordInput extends DesktopInput implements AutoCloseable {
             hasRecordedInput = true;
             lastInputTick = tick;
         }
+    }
+
+    /** Keeps held fire and boost state present in every replay tick. */
+    static boolean shouldRecordContinuousInput(long tick, long lastInputTick,
+                                               boolean shooting, boolean boosting) {
+        return tick != lastInputTick && (shooting || boosting);
     }
 
     /** Registers listeners for gameplay events that need replay records. */

@@ -11,6 +11,7 @@ import arc.util.serialization.Jval;
 import mindustry.Vars;
 import mindustry.game.EventType.DisposeEvent;
 import mindustry.game.EventType.PlayEvent;
+import mindustry.game.EventType.Trigger;
 import mindustry.mod.Mod;
 import mindustry.mod.Mods.LoadedMod;
 
@@ -31,7 +32,16 @@ public class ReplayMod extends Mod {
         loadMetadataSettings();
         loadConfiguration();
         replayHud.load();
-        Events.on(PlayEvent.class, event -> showIntro());
+        Events.on(PlayEvent.class, event -> {
+            try {
+                controller.stopPlaybackForNewGame();
+            } catch (IOException e) {
+                Log.err("Failed to stop replay before starting a new game", e);
+            }
+            showIntro();
+        });
+        Events.run(Trigger.beforeGameUpdate, controller::maintainPlaybackWeapons);
+        Events.run(Trigger.afterGameUpdate, controller::maintainPlaybackWeapons);
         Events.on(DisposeEvent.class, event -> {
             if (!controller.isActive()) return;
             try {

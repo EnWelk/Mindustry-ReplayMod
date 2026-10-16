@@ -3,6 +3,13 @@ package com.enwelk.replaymod;
 import java.lang.reflect.Field;
 
 import com.enwelk.replaymod.rep.RepReader;
+import arc.Core;
+import arc.Graphics;
+import arc.util.Time;
+import mindustry.Vars;
+import mindustry.gen.MechUnit;
+import mindustry.gen.Player;
+import mindustry.gen.Unit;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -10,6 +17,8 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 class ReplayControllerTests {
 
@@ -118,6 +127,88 @@ class ReplayControllerTests {
         }
     }
 
+    /** Checks held shooting and boost are recorded for each new game tick. */
+    @Test
+    void continuousInputsAreRecordedOnEveryNewTick() {
+        assertTrue(ReplayRecordInput.shouldRecordContinuousInput(12L, 11L, true, false));
+        assertTrue(ReplayRecordInput.shouldRecordContinuousInput(12L, 11L, false, true));
+        assertFalse(ReplayRecordInput.shouldRecordContinuousInput(12L, 11L, false, false));
+        assertFalse(ReplayRecordInput.shouldRecordContinuousInput(12L, 12L, true, false));
+    }
+
+    /** Checks playback reapplies held fire to the local unit's weapon mounts. */
+    @Test
+    void playbackMaintainsHeldShooting() throws Exception {
+        ReplayController controller = activeController(0L, 100L);
+        Player previousPlayer = Vars.player;
+        Player player = mock(Player.class);
+        Unit unit = mock(Unit.class);
+        when(player.unit()).thenReturn(unit);
+        Vars.player = player;
+        setField(controller, "lastTick", new RepReader.TickRecord(
+            1L, 0f, 0f, 10f, 20f, true, false, (short)-1, (short)-1,
+            Float.NaN, Float.NaN, Float.NaN
+        ));
+
+        try {
+            controller.maintainPlaybackWeapons();
+        } finally {
+            Vars.player = previousPlayer;
+        }
+
+        assertTrue(player.shooting);
+        verify(unit).controlWeapons(true, true);
+    }
+
+    /** Checks playback releases weapons when the recorded fire state ends. */
+    @Test
+    void playbackReleasesWeaponsWhenShootingEnds() throws Exception {
+        ReplayController controller = activeController(0L, 100L);
+        Player previousPlayer = Vars.player;
+        Player player = mock(Player.class);
+        Unit unit = mock(Unit.class);
+        when(player.unit()).thenReturn(unit);
+        Vars.player = player;
+        setField(controller, "lastTick", new RepReader.TickRecord(
+            2L, 0f, 0f, 10f, 20f, false, false, (short)-1, (short)-1,
+            Float.NaN, Float.NaN, Float.NaN
+        ));
+
+        try {
+            controller.maintainPlaybackWeapons();
+        } finally {
+            Vars.player = previousPlayer;
+        }
+
+        assertFalse(player.shooting);
+        verify(unit).controlWeapons(true, false);
+    }
+
+    /** Checks playback preserves Mindustry's no-shooting rule for flying mechs. */
+    @Test
+    void playbackDisablesShootingForFlyingMechs() throws Exception {
+        ReplayController controller = activeController(0L, 100L);
+        Player previousPlayer = Vars.player;
+        Player player = mock(Player.class);
+        MechUnit unit = mock(MechUnit.class);
+        when(player.unit()).thenReturn(unit);
+        when(unit.isFlying()).thenReturn(true);
+        Vars.player = player;
+        setField(controller, "lastTick", new RepReader.TickRecord(
+            1L, 0f, 0f, 10f, 20f, true, false, (short)-1, (short)-1,
+            Float.NaN, Float.NaN, Float.NaN
+        ));
+
+        try {
+            controller.maintainPlaybackWeapons();
+        } finally {
+            Vars.player = previousPlayer;
+        }
+
+        assertTrue(player.shooting);
+        verify(unit).controlWeapons(true, false);
+    }
+
     /** Checks listener replacement and safe clearing. */
     @Test
     void listenersCanBeSetAndCleared() throws Exception {
@@ -163,6 +254,39 @@ class ReplayControllerTests {
         org.junit.jupiter.api.Assertions.assertDoesNotThrow(controller::stopPlaybackManually);
 
         assertFalse(stopped[0]);
+    }
+
+    /** Checks that a new game stops playback without showing the manual-stop callback. */
+    @Test
+    void startingNewGameStopsActivePlayback() throws Exception {
+        ReplayController controller = activeController(15L, 100L);
+        Graphics previousGraphics = Core.graphics;
+        Graphics graphics = mock(Graphics.class);
+        when(graphics.getDeltaTime()).thenReturn(1f / 60f);
+        Core.graphics = graphics;
+        boolean[] stopped = {false};
+        controller.setPlaybackStoppedListener(() -> stopped[0] = true);
+
+        try {
+            controller.stopPlaybackForNewGame();
+        } finally {
+            Core.graphics = previousGraphics;
+            Time.setDeltaProvider(() -> 1f);
+        }
+
+        assertFalse(controller.isPlaying());
+        assertFalse(controller.isActive());
+        assertFalse(stopped[0]);
+    }
+
+    /** Checks that a game-start event is harmless when playback is idle. */
+    @Test
+    void startingNewGameDoesNothingWhenPlaybackIsIdle() {
+        ReplayController controller = new ReplayController();
+
+        org.junit.jupiter.api.Assertions.assertDoesNotThrow(controller::stopPlaybackForNewGame);
+
+        assertFalse(controller.isPlaying());
     }
 
     /** Checks that stopping an idle controller reports invalid state. */
