@@ -25,8 +25,10 @@ public class RepWriter implements Closeable {
     public static final byte TICK_RECORD = 1;
     public static final byte ACTION_RECORD = 2;
     public static final byte END_RECORD = 3;
+    public static final byte RANDOM_RECORD = 4;
 
     private final FileChannel channel;
+    private final long randomSeed0, randomSeed1;
     private final ByteBuffer outputBuffer = ByteBuffer.allocate(64 * 1024);
     private final ByteBuffer tickPayload = ByteBuffer.allocate(Long.BYTES + 7 * Float.BYTES + 2 + 4)
         .order(ByteOrder.LITTLE_ENDIAN);
@@ -34,6 +36,8 @@ public class RepWriter implements Closeable {
 
     /** Creates a replay file and writes its save and metadata header. */
     public RepWriter(Path filePath) throws IOException {
+        randomSeed0 = arc.math.Mathf.rand.seed0;
+        randomSeed1 = arc.math.Mathf.rand.seed1;
         channel = FileChannel.open(filePath,
             StandardOpenOption.WRITE,
             StandardOpenOption.CREATE,
@@ -71,6 +75,7 @@ public class RepWriter implements Closeable {
         writeFully(header);
         writeFully(ByteBuffer.wrap(saveData));
         writeModMetadata();
+        writeRandomState();
     }
 
     /** Writes the enabled mod names and versions into the replay header. */
@@ -149,6 +154,23 @@ public class RepWriter implements Closeable {
         }
         payload.flip();
         writeRecord(ACTION_RECORD, payload);
+    }
+
+    /** Writes the global random generator state before a game update. */
+    public void writeRandomState(long tick) throws IOException {
+        ByteBuffer payload = ByteBuffer.allocate(Long.BYTES * 3).order(ByteOrder.LITTLE_ENDIAN);
+        payload.putLong(tick);
+        payload.putLong(arc.math.Mathf.rand.seed0);
+        payload.putLong(arc.math.Mathf.rand.seed1);
+        payload.flip();
+        writeRecord(RANDOM_RECORD, payload);
+    }
+
+    /** Stores the current global random generator state after replay metadata. */
+    private void writeRandomState() throws IOException {
+        ByteBuffer state = ByteBuffer.allocate(Long.BYTES * 2).order(ByteOrder.LITTLE_ENDIAN);
+        state.putLong(randomSeed0).putLong(randomSeed1).flip();
+        writeFully(state);
     }
 
     /** Writes the terminal record once to mark the replay's last tick. */

@@ -9,6 +9,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -18,40 +20,45 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class RepReaderMetadataTests {
+    private static final float CURRENT_VERSION = 5f;
+
     @TempDir
     Path tempDir;
 
-    /** Checks metadata decoding and legacy replays without mod lists. */
-    @Test
-    void readsModMetadataAndAllowsLegacyReplaysWithoutMetadata() throws IOException {
-        Path version3 = Files.write(tempDir.resolve("mods.rep"), replay(3f, List.of("alpha@1.0", "beta@2")));
-        Path version2 = Files.write(tempDir.resolve("old.rep"), replay(2f, List.of()));
+    private float previousVersion;
 
-        assertEquals(List.of("alpha@1.0", "beta@2"), RepReader.readUsedMods(version3));
-        assertEquals(List.of(), RepReader.readUsedMods(version2));
+    /** Uses the current replay format version for validation tests. */
+    @BeforeEach
+    void setCurrentReplayVersion() {
+        Field version = replayVersionField();
+        previousVersion = getReplayVersion(version);
+        setReplayVersion(version, CURRENT_VERSION);
     }
 
-    /** Checks import validation for current and legacy file versions. */
-    @Test
-    void validatesImportForSupportedReplayVersions() throws IOException {
-        Path version3 = Files.write(tempDir.resolve("valid.rep"), replay(3f, List.of("alpha@1")));
-        Path version1 = Files.write(tempDir.resolve("legacy.rep"), replay(1f, List.of()));
+    /** Restores the configured replay version after each test. */
+    @AfterEach
+    void restoreReplayVersion() {
+        setReplayVersion(replayVersionField(), previousVersion);
+    }
 
-        Field version = replayVersionField();
-        float previous = getReplayVersion(version);
-        try {
-            version.setFloat(null, 3f);
-            RepReader.validateForImport(version3);
-            RepReader.validateForImport(version1);
-        } catch (IllegalAccessException e) {
-            throw new AssertionError(e);
-        } finally {
-            try {
-                version.setFloat(null, previous);
-            } catch (IllegalAccessException e) {
-                throw new AssertionError(e);
-            }
-        }
+    /** Checks metadata decoding for the current replay format. */
+    @Test
+    void readsCurrentFormatModMetadata() throws IOException {
+        Path current = Files.write(tempDir.resolve("mods.rep"),
+            replay(CURRENT_VERSION, List.of("alpha@1.0", "beta@2")));
+
+        assertEquals(List.of("alpha@1.0", "beta@2"), RepReader.readUsedMods(current));
+    }
+
+    /** Accepts only the configured replay format and rejects legacy formats. */
+    @Test
+    void validatesOnlyCurrentReplayVersion() throws IOException {
+        Path current = Files.write(tempDir.resolve("current.rep"), replay(CURRENT_VERSION, List.of()));
+        Path legacy = Files.write(tempDir.resolve("legacy.rep"), replay(4f, List.of()));
+
+        RepReader.validateForImport(current);
+        assertThrows(IOException.class, () -> RepReader.readUsedMods(legacy));
+        assertThrows(IOException.class, () -> RepReader.validateForImport(legacy));
     }
 
     /** Checks malformed headers, unsupported versions, and metadata markers. */
@@ -59,7 +66,8 @@ class RepReaderMetadataTests {
     void rejectsMalformedHeadersVersionsAndMetadata() throws IOException {
         Path badHeader = Files.write(tempDir.resolve("bad-header.rep"), new byte[]{1, 2, 3});
         Path unsupported = Files.write(tempDir.resolve("future.rep"), replay(99f, List.of()));
-        Path badMetadata = Files.write(tempDir.resolve("bad-metadata.rep"), replay(3f, List.of()));
+        Path badMetadata = Files.write(tempDir.resolve("bad-metadata.rep"),
+            replay(CURRENT_VERSION, List.of()));
         byte[] bytes = Files.readAllBytes(badMetadata);
         int metadataOffset = 3 + Float.BYTES + Integer.BYTES + 1;
         bytes[metadataOffset] = 'X';
@@ -75,7 +83,8 @@ class RepReaderMetadataTests {
     void rejectsTruncatedReplayDataAndMalformedModNames() throws IOException {
         Path truncated = Files.write(tempDir.resolve("truncated.rep"),
             new byte[]{'R', 'E', 'P', 0, 0, 64, 64, 1, 0, 0, 0});
-        Path invalidMod = Files.write(tempDir.resolve("invalid-mod.rep"), replay(3f, List.of()));
+        Path invalidMod = Files.write(tempDir.resolve("invalid-mod.rep"),
+            replay(CURRENT_VERSION, List.of()));
         byte[] bytes = Files.readAllBytes(invalidMod);
         int metadataOffset = 3 + Float.BYTES + Integer.BYTES + 1;
         ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
@@ -87,13 +96,13 @@ class RepReaderMetadataTests {
         assertThrows(IOException.class, () -> RepReader.readUsedMods(invalidMod));
     }
 
-    /** Builds a minimal replay header with optional mod metadata. */
+    /** Builds a minimal replay header using the current format layout. */
     private static byte[] replay(float version, List<String> mods) {
         int metadataSize = 8;
         for (String mod : mods) {
             metadataSize += Integer.BYTES + mod.getBytes(StandardCharsets.UTF_8).length;
         }
-        int metadataSizeTotal = Float.compare(version, 3f) >= 0 ? metadataSize : 0;
+        int metadataSizeTotal = metadataSize + Long.BYTES * 2;
         ByteBuffer buffer = ByteBuffer.allocate(
             3 + Float.BYTES + Integer.BYTES + 1 + metadataSizeTotal + 13
         ).order(ByteOrder.LITTLE_ENDIAN);
@@ -101,14 +110,13 @@ class RepReaderMetadataTests {
         buffer.putFloat(version);
         buffer.putInt(1);
         buffer.put((byte)42);
-        if (Float.compare(version, 3f) >= 0) {
-            buffer.put((byte)'M').put((byte)'O').put((byte)'D').put((byte)'S');
-            buffer.putInt(mods.size());
-            for (String mod : mods) {
-                byte[] name = mod.getBytes(StandardCharsets.UTF_8);
-                buffer.putInt(name.length).put(name);
-            }
+        buffer.put((byte)'M').put((byte)'O').put((byte)'D').put((byte)'S');
+        buffer.putInt(mods.size());
+        for (String mod : mods) {
+            byte[] name = mod.getBytes(StandardCharsets.UTF_8);
+            buffer.putInt(name.length).put(name);
         }
+        buffer.putLong(1L).putLong(2L);
         return buffer.array();
     }
 
@@ -127,6 +135,15 @@ class RepReaderMetadataTests {
     private static float getReplayVersion(Field field) {
         try {
             return field.getFloat(null);
+        } catch (IllegalAccessException e) {
+            throw new AssertionError(e);
+        }
+    }
+
+    /** Sets the replay version field while preserving test isolation. */
+    private static void setReplayVersion(Field field, float version) {
+        try {
+            field.setFloat(null, version);
         } catch (IllegalAccessException e) {
             throw new AssertionError(e);
         }

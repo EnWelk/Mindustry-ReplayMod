@@ -47,6 +47,7 @@ public class ReplayController {
     private Path playbackPath;
     private RepReader.ReplayRecord nextRecord;
     private RepReader.TickRecord lastTick;
+    private RepReader.RandomRecord lastRandomState;
     private long currentTick;
     private long playbackOrigin;
     private long durationTicks;
@@ -106,6 +107,22 @@ public class ReplayController {
         return reader != null;
     }
 
+    /** Restores the recorded RNG state immediately before a playback simulation update. */
+    void applyPlaybackRandomState() {
+        if (reader == null || lastRandomState == null) return;
+        Mathf.rand.setState(lastRandomState.seed0(), lastRandomState.seed1());
+    }
+
+    /** Records the global RNG state immediately before each recording simulation update. */
+    void recordRandomState() {
+        if (recordingInput == null || writer == null || Vars.state == null) return;
+        try {
+            writer.writeRandomState((long)Math.floor(Vars.state.tick));
+        } catch (IOException e) {
+            Log.err("Failed to write replay random state", e);
+        }
+    }
+
     /** Returns the current replay-relative tick. */
     public long currentTick() {
         return currentTick;
@@ -151,7 +168,6 @@ public class ReplayController {
             throw new IllegalArgumentException("Unsupported replay speed: " + speed);
         }
         playbackSpeed = speed;
-        if (reader != null && seekTarget < 0L) installPlaybackTimeScale();
     }
 
     /** Requests a seek; backward seeks restore the embedded map before simulating forward. */
@@ -235,12 +251,16 @@ public class ReplayController {
         }
     }
 
-    /** Advances the replay clock to match the simulation multiplier. */
+    /** Advances replay records between ordinary simulation steps at the selected speed. */
     void syncPlaybackClock() {
-        if (reader == null || isPlaybackPaused() || seekTarget >= 0L ||
-            Vars.state == null || !Vars.state.isPlaying()) return;
-        float rawDelta = Core.graphics.getDeltaTime() * 60f;
-        Vars.state.tick += Time.delta - rawDelta;
+        if (reader == null || playbackInput == null || isPlaybackPaused() ||
+            seekTarget >= 0L || Vars.state == null || !Vars.state.isPlaying()) return;
+        updatePlayback();
+        for (int i = 1; i < playbackSpeed && reader != null &&
+            Vars.state != null && Vars.state.isPlaying(); i++) {
+            Vars.logic.update();
+            updatePlayback();
+        }
     }
 
     /** Returns whether playback or the game state is paused. */
@@ -276,6 +296,7 @@ public class ReplayController {
         RepReader newReader = new RepReader(path);
         try {
             newReader.scanTimeline();
+            restoreReplayRandomState(newReader);
             previousInput = input;
             reader = newReader;
             playbackPath = path;
@@ -284,6 +305,7 @@ public class ReplayController {
             playbackInput = new Viewer(this);
             nextRecord = reader.readNext();
             lastTick = null;
+            lastRandomState = null;
             currentTick = 0L;
             playbackPaused = false;
             Vars.state.tick = 0d;
@@ -305,6 +327,7 @@ public class ReplayController {
             playbackInput = null;
             nextRecord = null;
             lastTick = null;
+            lastRandomState = null;
             playbackPaused = false;
             previousInput = null;
             try {
@@ -375,6 +398,8 @@ public class ReplayController {
                     for (Action action : actionRecord.actions()) {
                         apply(action);
                     }
+                } else if (nextRecord instanceof RepReader.RandomRecord randomRecord) {
+                    lastRandomState = randomRecord;
                 } else if (nextRecord instanceof RepReader.EndRecord) {
                     finished = true;
                     nextRecord = null;
@@ -573,6 +598,7 @@ public class ReplayController {
         playbackInput = null;
         nextRecord = null;
         lastTick = null;
+        lastRandomState = null;
         playbackPaused = false;
         seekTarget = -1L;
         try {
@@ -607,12 +633,14 @@ public class ReplayController {
         RepReader restarted = new RepReader(playbackPath);
         try {
             restarted.scanTimeline();
+            restoreReplayRandomState(restarted);
             RepReader oldReader = reader;
             reader = restarted;
             playbackOrigin = restarted.firstTick();
             durationTicks = Math.max(0L, restarted.endTick() - playbackOrigin);
             nextRecord = restarted.readNext();
             lastTick = null;
+            lastRandomState = null;
             currentTick = 0L;
             Vars.state.tick = 0d;
             Vars.state.set(GameState.State.playing);
@@ -634,7 +662,7 @@ public class ReplayController {
         Time.setDeltaProvider(() -> {
             float delta = Core.graphics.getDeltaTime() * 60f;
             if (Float.isNaN(delta) || Float.isInfinite(delta)) delta = 1f;
-            return Mathf.clamp(delta, 0.0001f, Vars.maxDeltaClient) * playbackSpeed;
+            return Mathf.clamp(delta, 0.0001f, Vars.maxDeltaClient);
         });
     }
 
@@ -645,6 +673,13 @@ public class ReplayController {
             if (Float.isNaN(delta) || Float.isInfinite(delta)) delta = 1f;
             return Mathf.clamp(delta, 0.0001f, Vars.maxDeltaClient);
         });
+    }
+
+    /** Restores the recorded global random generator state after the embedded save loads. */
+    private void restoreReplayRandomState(RepReader replay) {
+        if (replay.hasRandomState()) {
+            Mathf.rand.setState(replay.randomSeed0(), replay.randomSeed1());
+        }
     }
 
     /** Rejects a new replay operation while another session is active. */

@@ -17,12 +17,13 @@ import com.enwelk.replaymod.Action;
 import com.enwelk.replaymod.ReplayMod;
 
 import arc.files.Fi;
+import arc.math.Mathf;
 import arc.util.io.FastDeflaterOutputStream;
 import mindustry.io.SaveIO;
 
 public class RepReader implements Closeable {
     private static final int MAX_MAP_SIZE = 256 * 1024 * 1024;
-    private static final int MAX_RECORD_SIZE = 64 * 1024 * 1024;
+    private static final int MAX_RECORD_SIZE = 256 * 1024 * 1024;
     private static final int MAX_MOD_METADATA_SIZE = 1024 * 1024;
     private static final int MAX_MOD_COUNT = 4096;
 
@@ -31,6 +32,8 @@ public class RepReader implements Closeable {
     private final ByteBuffer inputBuffer = ByteBuffer.allocate(64 * 1024);
     private final float version;
     private List<String> usedMods = List.of();
+    private long randomSeed0, randomSeed1;
+    private boolean hasRandomState;
     private long recordsStart;
     private long firstTick = Long.MAX_VALUE;
     private long endTick;
@@ -62,6 +65,23 @@ public class RepReader implements Closeable {
         return usedMods;
     }
 
+    /** Returns whether this replay contains a recorded global random state. */
+    public boolean hasRandomState() {
+        return hasRandomState;
+    }
+
+    /** Returns the first recorded random generator seed. */
+    public long randomSeed0() {
+        if (!hasRandomState) throw new IllegalStateException("Replay has no random state");
+        return randomSeed0;
+    }
+
+    /** Returns the second recorded random generator seed. */
+    public long randomSeed1() {
+        if (!hasRandomState) throw new IllegalStateException("Replay has no random state");
+        return randomSeed1;
+    }
+
     /** Reads replay mod metadata without loading the embedded save into the active world. */
     public static List<String> readUsedMods(Path filePath) throws IOException {
         try (FileChannel file = FileChannel.open(filePath, StandardOpenOption.READ)) {
@@ -73,18 +93,19 @@ public class RepReader implements Closeable {
                 throw new IOException("Invalid replay header");
             }
             float version = header.getFloat();
+            if (!isSupportedVersion(version)) {
+                throw new IOException("Unsupported replay version: " + version);
+            }
             int mapSize = header.getInt();
             if (mapSize <= 0 || mapSize > MAX_MAP_SIZE ||
                 file.size() < 3L + Float.BYTES + Integer.BYTES + mapSize) {
                 throw new IOException("Invalid replay map size");
             }
-            if (Float.compare(version, 3f) < 0) return List.of();
-            if (Float.compare(version, 3f) > 0) {
-                throw new IOException("Unsupported replay version: " + version);
-            }
 
             file.position(3L + Float.BYTES + Integer.BYTES + mapSize);
-            return readModMetadata(file);
+            List<String> mods = readModMetadata(file);
+            readRandomState(file);
+            return mods;
         }
     }
 
@@ -109,10 +130,9 @@ public class RepReader implements Closeable {
                 file.size() < 3L + Float.BYTES + Integer.BYTES + mapSize + 1L + Integer.BYTES + Long.BYTES) {
                 throw new IOException("Invalid or truncated replay map data");
             }
-            if (Float.compare(version, 3f) >= 0) {
-                file.position(3L + Float.BYTES + Integer.BYTES + mapSize);
-                readModMetadata(file);
-            }
+            file.position(3L + Float.BYTES + Integer.BYTES + mapSize);
+            readModMetadata(file);
+            readRandomState(file);
         }
     }
 
@@ -162,7 +182,7 @@ public class RepReader implements Closeable {
         inputBuffer.limit(0);
     }
 
-    /** Reads and validates the file header, map, and optional mod metadata. */
+    /** Reads the current-format header and seeds RNG before loading the map. */
     private float readHeader() throws IOException {
         ByteBuffer header = ByteBuffer.allocate(3 + Float.BYTES + Integer.BYTES)
             .order(ByteOrder.LITTLE_ENDIAN);
@@ -185,9 +205,9 @@ public class RepReader implements Closeable {
 
         byte[] mapData = new byte[mapDataSize];
         readFully(ByteBuffer.wrap(mapData), false);
-        if (Float.compare(fileVersion, 3f) >= 0) {
-            usedMods = readModMetadata();
-        }
+        usedMods = readModMetadata();
+        readRandomState();
+        Mathf.rand.setState(randomSeed0, randomSeed1);
         Path tempPath = Files.createTempFile("replay-map", ".msav");
         try {
             if (isUncompressedSave(mapData)) {
@@ -203,6 +223,38 @@ public class RepReader implements Closeable {
         }
         recordsStart = channel.position() - inputBuffer.remaining();
         return fileVersion;
+    }
+
+    /** Reads the recorded global RNG state from the replay header. */
+    private void readRandomState() throws IOException {
+        ByteBuffer state = ByteBuffer.allocate(Long.BYTES * 2).order(ByteOrder.LITTLE_ENDIAN);
+        readFully(state, false);
+        state.flip();
+        RandomState randomState = decodeRandomState(state);
+        randomSeed0 = randomState.seed0();
+        randomSeed1 = randomState.seed1();
+        hasRandomState = true;
+    }
+
+    /** Reads the fixed-width RNG state from a channel. */
+    private static RandomState readRandomState(FileChannel file) throws IOException {
+        ByteBuffer state = ByteBuffer.allocate(Long.BYTES * 2).order(ByteOrder.LITTLE_ENDIAN);
+        readChannelFully(file, state);
+        state.flip();
+        return decodeRandomState(state);
+    }
+
+    /** Decodes the two fixed-width seeds in a replay header. */
+    static RandomState decodeRandomState(ByteBuffer state) throws IOException {
+        if (state.remaining() != Long.BYTES * 2) {
+            throw new IOException("Invalid replay random state size");
+        }
+        long seed0 = state.getLong();
+        long seed1 = state.getLong();
+        if ((seed0 | seed1) == 0L) {
+            throw new IOException("Invalid replay random state");
+        }
+        return new RandomState(seed0, seed1);
     }
 
     /** Reads mod metadata from this reader's current channel position. */
@@ -266,9 +318,7 @@ public class RepReader implements Closeable {
 
     /** Checks whether a replay format version is supported. */
     private static boolean isSupportedVersion(float version) {
-        return Float.compare(version, ReplayMod.replayVersion()) == 0 ||
-            Float.compare(version, 1f) == 0 ||
-            Float.compare(version, 2f) == 0;
+        return Float.compare(version, ReplayMod.replayVersion()) == 0;
     }
 
     /** Fills a buffer from a file channel or reports truncation. */
@@ -318,6 +368,7 @@ public class RepReader implements Closeable {
         try {
             if (type == RepWriter.TICK_RECORD) return readTick(payload);
             if (type == RepWriter.ACTION_RECORD) return readActions(payload);
+            if (type == RepWriter.RANDOM_RECORD) return readRandomRecord(payload);
             if (type == RepWriter.END_RECORD) {
                 if (payload.remaining() != Long.BYTES) {
                     throw new IOException("Invalid replay end record size");
@@ -332,8 +383,7 @@ public class RepReader implements Closeable {
 
     /** Decodes one player-state record. */
     private TickRecord readTick(ByteBuffer payload) throws IOException {
-        boolean hasCamera = Float.compare(version, 1f) != 0;
-        int expectedSize = Long.BYTES + (hasCamera ? 7 : 4) * Float.BYTES + 2 + 4;
+        int expectedSize = Long.BYTES + 7 * Float.BYTES + 2 + 4;
         if (payload.remaining() != expectedSize) {
             throw new IOException("Invalid tick record size: " + payload.remaining());
         }
@@ -343,13 +393,13 @@ public class RepReader implements Closeable {
         float movementY = payload.getFloat();
         float aimX = payload.getFloat();
         float aimY = payload.getFloat();
-        float cameraX = hasCamera ? payload.getFloat() : Float.NaN;
-        float cameraY = hasCamera ? payload.getFloat() : Float.NaN;
-        float cameraScale = hasCamera ? payload.getFloat() : Float.NaN;
+        float cameraX = payload.getFloat();
+        float cameraY = payload.getFloat();
+        float cameraScale = payload.getFloat();
         if (!Float.isFinite(movementX) || !Float.isFinite(movementY) ||
             !Float.isFinite(aimX) || !Float.isFinite(aimY) ||
-            (hasCamera && (!Float.isFinite(cameraX) || !Float.isFinite(cameraY) ||
-                !Float.isFinite(cameraScale) || cameraScale <= 0f))) {
+            !Float.isFinite(cameraX) || !Float.isFinite(cameraY) ||
+            !Float.isFinite(cameraScale) || cameraScale <= 0f) {
             throw new IOException("Invalid non-finite replay control value");
         }
         byte shooting = payload.get();
@@ -385,6 +435,25 @@ public class RepReader implements Closeable {
             throw new IOException("Unexpected trailing data in action record");
         }
         return new ActionRecord(tick, List.copyOf(actions));
+    }
+
+    /** Reads a per-update random generator checkpoint. */
+    private RandomRecord readRandomRecord(ByteBuffer payload) throws IOException {
+        return decodeRandomRecord(payload);
+    }
+
+    /** Decodes a per-update random generator checkpoint. */
+    static RandomRecord decodeRandomRecord(ByteBuffer payload) throws IOException {
+        if (payload.remaining() != Long.BYTES * 3) {
+            throw new IOException("Invalid replay random state record");
+        }
+        long tick = payload.getLong();
+        long seed0 = payload.getLong();
+        long seed1 = payload.getLong();
+        if ((seed0 | seed1) == 0L) {
+            throw new IOException("Invalid replay random state");
+        }
+        return new RandomRecord(tick, seed0, seed1);
     }
 
     /** Reads the requested bytes, optionally accepting a clean end of file. */
@@ -427,7 +496,11 @@ public class RepReader implements Closeable {
                              float cameraX, float cameraY, float cameraScale)
         implements ReplayRecord {}
 
+    record RandomState(long seed0, long seed1) {}
+
     public record ActionRecord(long tick, List<Action> actions) implements ReplayRecord {}
+
+    public record RandomRecord(long tick, long seed0, long seed1) implements ReplayRecord {}
 
     public record EndRecord(long tick) implements ReplayRecord {}
 }

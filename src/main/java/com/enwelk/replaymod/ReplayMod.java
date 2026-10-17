@@ -40,6 +40,8 @@ public class ReplayMod extends Mod {
             }
             showIntro();
         });
+        Events.run(Trigger.beforeGameUpdate, controller::applyPlaybackRandomState);
+        Events.run(Trigger.beforeGameUpdate, controller::recordRandomState);
         Events.run(Trigger.beforeGameUpdate, controller::maintainPlaybackWeapons);
         Events.run(Trigger.afterGameUpdate, controller::maintainPlaybackWeapons);
         Events.on(DisposeEvent.class, event -> {

@@ -5,11 +5,15 @@ For manual builds, replace mindustryDir and arcDir with the actual paths.
 Replay format .rep
 
 TODO:
+- Critical | Fix random events
+- Optimixe .rep format
 - Optimize rewind
 - Fix some bag in map after replay
 - Record and replay complete multiplayer sessions, including actions from every player and server-authoritative world changes.
 
-Change log:
+Change log: and other random depended actions
+  - v0.3.4
+    - Fix some small bags
   - v0.3.3.1
     - Critical | Fix replay stop
   - v0.3.3
@@ -33,7 +37,7 @@ Change log:
     - Add screen when replay ends
     - Ui update
   - v0.2.1
-    - Android compatibility fix
+    - Critical | Android compatibility fix
   - v0.2
     - Class for replay
   - v0.1
