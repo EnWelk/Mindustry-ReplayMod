@@ -3,6 +3,8 @@ package com.enwelk.replaymod;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 
+import com.enwelk.replaymod.util.VarInt;
+
 /** Stores one recorded player action in its compact replay format. */
 public abstract class Action {
     public final byte actionType;
@@ -49,6 +51,7 @@ public abstract class Action {
             case 9: action = new TileTap(); break;
             case 10: action = new BuildPause(); break;
             case 11: action = new ModeChange(); break;
+            case 12: action = new Teleport(); break;
             default:
                 throw new IllegalArgumentException("Unknown action type: " + type);
         }
@@ -69,31 +72,30 @@ public abstract class Action {
         return buffer;
     }
 
-    /** Returns the fixed payload size for a primitive config type. */
-    protected static int configSize(byte type) {
+    /** Returns the size of an encoded config value. */
+    protected static int configSize(byte type, int integer, byte[] data) {
         switch (type) {
             case 0: return 0;
-            case 1: return 4;
+            case 1: return VarInt.size(zigZag(integer));
             case 2: return 4;
             case 3: return 2;
-            case 4: return 0;
-            case 5: return 0;
+            case 4:
+            case 5:
+                if (data == null) throw new IllegalArgumentException("Missing serialized config data");
+                return Math.addExact(VarInt.size(data.length), data.length);
             default: throw new IllegalArgumentException("Unknown config type: " + type);
         }
     }
 
-    /** Returns the payload size for primitive or serialized config data. */
-    protected static int configSize(byte type, byte[] data) {
-        return type == 4 || type == 5
-            ? Integer.BYTES + (data == null ? 0 : data.length)
-            : configSize(type);
+    private static int zigZag(int value) {
+        return (value << 1) ^ (value >> 31);
     }
 
     /** Writes a typed config value in the replay format. */
     protected static void writeConfig(ByteBuffer buffer, byte type, int integer, short x, short y, short itemId, byte[] data) {
         switch (type) {
             case 0: break;
-            case 1: buffer.putInt(integer); break;
+            case 1: VarInt.writeSigned(buffer, integer); break;
             case 2: buffer.putShort(x); buffer.putShort(y); break;
             case 3: buffer.putShort(itemId); break;
             case 4:
@@ -101,7 +103,7 @@ public abstract class Action {
                 if (data == null) {
                     throw new IllegalArgumentException("Missing serialized config data");
                 }
-                buffer.putInt(data.length);
+                VarInt.write(buffer, data.length);
                 buffer.put(data);
                 break;
             default:
@@ -115,7 +117,7 @@ public abstract class Action {
             BuildPlan a = (BuildPlan) action;
             switch (a.configType) {
                 case 0: break;
-                case 1: a.configInt = buffer.getInt(); break;
+                case 1: a.configInt = VarInt.readSigned(buffer); break;
                 case 2: a.configShortX = buffer.getShort(); a.configShortY = buffer.getShort(); break;
                 case 3: a.configItemId = buffer.getShort(); break;
                 case 4: a.configData = readConfigData(buffer); break;
@@ -126,7 +128,7 @@ public abstract class Action {
             Config a = (Config) action;
             switch (a.configType) {
                 case 0: break;
-                case 1: a.configInt = buffer.getInt(); break;
+                case 1: a.configInt = VarInt.readSigned(buffer); break;
                 case 2: a.configShortX = buffer.getShort(); a.configShortY = buffer.getShort(); break;
                 case 3: a.configItemId = buffer.getShort(); break;
                 case 4: a.configData = readConfigData(buffer); break;
@@ -138,7 +140,7 @@ public abstract class Action {
 
     /** Reads length-prefixed serialized config bytes. */
     private static byte[] readConfigData(ByteBuffer buffer) {
-        int length = buffer.getInt();
+        int length = VarInt.read(buffer);
         if (length < 0 || length > buffer.remaining()) {
             throw new IllegalArgumentException("Invalid serialized config size: " + length);
         }
@@ -176,7 +178,10 @@ public abstract class Action {
         @Override
         /** Returns the size of the build-plan payload. */
         protected int dataSize() {
-            return 2 + 2 + 1 + 2 + 1 + configSize(configType, configData);
+            return Math.addExact(
+                2 + 2 + 1 + 2 + 1,
+                configSize(configType, configInt, configData)
+            );
         }
 
         @Override
@@ -233,7 +238,7 @@ public abstract class Action {
         }
     }
 
-    // Config (id=3): buildId(int), configType(byte), [value]
+    // Config (id=3): buildId(signed varint), configType(byte), [value]
     /** Records a configuration change to a building. */
     public static class Config extends Action {
         public int buildId;
@@ -250,13 +255,16 @@ public abstract class Action {
         @Override
         /** Returns the size of the building ID and config payload. */
         protected int dataSize() {
-            return 4 + 1 + configSize(configType, configData);
+            return Math.addExact(
+                Math.addExact(VarInt.size(zigZag(buildId)), 1),
+                configSize(configType, configInt, configData)
+            );
         }
 
         @Override
         /** Writes the building ID and config value. */
         protected void writeData(ByteBuffer b) {
-            b.putInt(buildId);
+            VarInt.writeSigned(b, buildId);
             b.put(configType);
             writeConfig(b, this);
         }
@@ -264,13 +272,13 @@ public abstract class Action {
         @Override
         /** Reads the building ID and config value. */
         protected void readData(ByteBuffer b) {
-            buildId = b.getInt();
+            buildId = VarInt.readSigned(b);
             configType = b.get();
             readConfig(b, this);
         }
     }
 
-    // UnitControl (id=4): unitId(int)
+    // UnitControl (id=4): unitId(varint)
     /** Records transferring control to a unit. */
     public static class UnitControl extends Action {
         public int unitId;
@@ -283,19 +291,21 @@ public abstract class Action {
         @Override
         /** Returns the unit ID payload size. */
         protected int dataSize() {
-            return 4;
+            if (unitId < 0) throw new IllegalArgumentException("Negative unit ID: " + unitId);
+            return VarInt.size(unitId);
         }
 
         @Override
         /** Writes the controlled unit ID. */
         protected void writeData(ByteBuffer b) {
-            b.putInt(unitId);
+            if (unitId < 0) throw new IllegalArgumentException("Negative unit ID: " + unitId);
+            VarInt.write(b, unitId);
         }
 
         @Override
         /** Reads the controlled unit ID. */
         protected void readData(ByteBuffer b) {
-            unitId = b.getInt();
+            unitId = VarInt.read(b);
         }
     }
 
@@ -322,7 +332,7 @@ public abstract class Action {
         protected void readData(ByteBuffer b) {}
     }
 
-    // RotateBlock (id=6): buildId(int), direction(byte: 1=CW, 0=CCW)
+    // RotateBlock (id=6): buildId(signed varint), direction(byte: 1=CW, 0=CCW)
     /** Records rotating a building. */
     public static class RotateBlock extends Action {
         public int buildId;
@@ -336,32 +346,32 @@ public abstract class Action {
         @Override
         /** Returns the building ID and direction payload size. */
         protected int dataSize() {
-            return 4 + 1;
+            return VarInt.size(zigZag(buildId)) + 1;
         }
 
         @Override
         /** Writes the building ID and rotation direction. */
         protected void writeData(ByteBuffer b) {
-            b.putInt(buildId);
+            VarInt.writeSigned(b, buildId);
             b.put(direction);
         }
 
         @Override
         /** Reads the building ID and rotation direction. */
         protected void readData(ByteBuffer b) {
-            buildId = b.getInt();
+            buildId = VarInt.readSigned(b);
             direction = b.get();
         }
     }
 
     // Command (id=7): target type in low two bits (0=position, 1=unit, 2=building),
-    // queued flag in bit 2, then targetId, position, unitCount and unitIds.
+    // queued flag in bit 2, then signed-varint targetId, position, varint unitCount and unitIds.
     /** Records a unit command and its selected units. */
     public static class Command extends Action {
         public byte cmdType;
         public int targetId;
         public float posX, posY;
-        public short unitCount;
+        public int unitCount;
         public int[] unitIds = new int[0];
 
         /** Creates a unit-command action. */
@@ -376,7 +386,13 @@ public abstract class Action {
             if (count > Short.MAX_VALUE) {
                 throw new IllegalArgumentException("Too many unit IDs: " + count);
             }
-            return 1 + 4 + 4 + 4 + 2 + (count * 4);
+            int size = 1 + VarInt.size(zigZag(targetId)) + 4 + 4 +
+                VarInt.size(count);
+            for (int id : unitIds == null ? new int[0] : unitIds) {
+                if (id < 0) throw new IllegalArgumentException("Negative unit ID: " + id);
+                size = Math.addExact(size, VarInt.size(id));
+            }
+            return size;
         }
 
         @Override
@@ -386,15 +402,16 @@ public abstract class Action {
             if (count > Short.MAX_VALUE) {
                 throw new IllegalArgumentException("Too many unit IDs: " + count);
             }
-            unitCount = (short) count;
+            unitCount = count;
             b.put(cmdType);
-            b.putInt(targetId);
+            VarInt.writeSigned(b, targetId);
             b.putFloat(posX);
             b.putFloat(posY);
-            b.putShort(unitCount);
+            VarInt.write(b, unitCount);
             if (unitIds != null) {
                 for (int id : unitIds) {
-                    b.putInt(id);
+                    if (id < 0) throw new IllegalArgumentException("Negative unit ID: " + id);
+                    VarInt.write(b, id);
                 }
             }
         }
@@ -403,21 +420,21 @@ public abstract class Action {
         /** Reads command target, position, and selected unit IDs. */
         protected void readData(ByteBuffer b) {
             cmdType = b.get();
-            targetId = b.getInt();
+            targetId = VarInt.readSigned(b);
             posX = b.getFloat();
             posY = b.getFloat();
-            unitCount = b.getShort();
-            if (unitCount < 0 || unitCount > b.remaining() / 4) {
+            unitCount = VarInt.read(b);
+            if (unitCount < 0 || unitCount > Short.MAX_VALUE || unitCount > b.remaining()) {
                 throw new IllegalArgumentException("Invalid unit count: " + unitCount);
             }
             unitIds = new int[unitCount];
             for (int i = 0; i < unitCount; i++) {
-                unitIds[i] = b.getInt();
+                unitIds[i] = VarInt.read(b);
             }
         }
     }
 
-    // PayloadAction (id=8): payloadActionType(byte: 1=Pickup, 2=Drop), targetType(byte: 1=Unit, 2=Building, 3=Position), targetId(int), dropX(float), dropY(float)
+    // PayloadAction (id=8): action type, target type, signed-varint target ID, drop position.
     /** Records picking up or dropping a payload. */
     public static class PayloadAction extends Action {
         public byte payloadActionType, targetType;
@@ -440,7 +457,7 @@ public abstract class Action {
         protected void writeData(ByteBuffer b) {
             b.put(payloadActionType);
             b.put(targetType);
-            b.putInt(targetId);
+            VarInt.writeSigned(b, targetId);
             b.putFloat(dropX);
             b.putFloat(dropY);
         }
@@ -450,7 +467,7 @@ public abstract class Action {
         protected void readData(ByteBuffer b) {
             payloadActionType = b.get();
             targetType = b.get();
-            targetId = b.getInt();
+            targetId = VarInt.readSigned(b);
             dropX = b.getFloat();
             dropY = b.getFloat();
         }
@@ -544,4 +561,34 @@ public abstract class Action {
             mode = b.get();
         }
     }
+
+    // Teleport (id=12): x(float), y(float)
+    /** Records an absolute player teleport. */
+    public static class Teleport extends Action {
+        public float x, y;
+
+        /** Creates a player-teleport action. */
+        public Teleport() {
+            super((byte) 12);
+        }
+
+        @Override
+        protected int dataSize() {
+            return Float.BYTES * 2;
+        }
+
+        @Override
+        protected void writeData(ByteBuffer b) {
+            b.putFloat(x);
+            b.putFloat(y);
+        }
+
+        @Override
+        protected void readData(ByteBuffer b) {
+            x = b.getFloat();
+            y = b.getFloat();
+        }
+    }
 }
+
+

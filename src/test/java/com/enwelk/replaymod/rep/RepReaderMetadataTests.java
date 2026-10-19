@@ -17,7 +17,9 @@ import org.junit.jupiter.api.io.TempDir;
 import com.enwelk.replaymod.ReplayMod;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class RepReaderMetadataTests {
     private static final float CURRENT_VERSION = 5f;
@@ -48,6 +50,30 @@ class RepReaderMetadataTests {
             replay(CURRENT_VERSION, List.of("alpha@1.0", "beta@2")));
 
         assertEquals(List.of("alpha@1.0", "beta@2"), RepReader.readUsedMods(current));
+    }
+
+    @Test
+    void velocityMarkerIsStrippedFromUsedMods() throws IOException {
+        Path file = Files.write(tempDir.resolve("velocity.rep"),
+            replay(CURRENT_VERSION, List.of(RepWriter.VELOCITY_RECORDING_MARKER, "alpha@1.0")));
+
+        assertEquals(List.of("alpha@1.0"), RepReader.readUsedMods(file));
+    }
+
+    @Test
+    void velocityMarkerOnlyFileReportsNoMods() throws IOException {
+        Path file = Files.write(tempDir.resolve("velocity-only.rep"),
+            replay(CURRENT_VERSION, List.of(RepWriter.VELOCITY_RECORDING_MARKER)));
+
+        assertEquals(List.of(), RepReader.readUsedMods(file));
+    }
+
+    @Test
+    void velocityMarkerHelpersDetectAndStrip() {
+        assertTrue(RepReader.hasVelocityMarker(List.of("a@1", RepWriter.VELOCITY_RECORDING_MARKER)));
+        assertFalse(RepReader.hasVelocityMarker(List.of("a@1")));
+        assertEquals(List.of("a@1"),
+            RepReader.withoutVelocityMarker(List.of("a@1", RepWriter.VELOCITY_RECORDING_MARKER)));
     }
 
     /** Accepts only the configured replay format and rejects legacy formats. */
@@ -149,3 +175,5 @@ class RepReaderMetadataTests {
         }
     }
 }
+
+

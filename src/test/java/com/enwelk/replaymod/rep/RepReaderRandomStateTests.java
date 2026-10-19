@@ -43,10 +43,10 @@ class RepReaderRandomStateTests {
         long tick = 42L;
         long seed0 = 0x123456789ABCDEFL;
         long seed1 = 0xFEDCBA9876543210L;
-        ByteBuffer record = ByteBuffer.allocate(Long.BYTES * 3).order(ByteOrder.LITTLE_ENDIAN);
-        record.putLong(tick).putLong(seed0).putLong(seed1).flip();
+        ByteBuffer record = ByteBuffer.allocate(Long.BYTES * 2).order(ByteOrder.LITTLE_ENDIAN);
+        record.putLong(seed0).putLong(seed1).flip();
 
-        RepReader.RandomRecord decoded = RepReader.decodeRandomRecord(record);
+        RepReader.RandomRecord decoded = RepReader.decodeRandomRecord(tick, record);
 
         assertEquals(tick, decoded.tick());
         assertEquals(seed0, decoded.seed0());
@@ -56,11 +56,13 @@ class RepReaderRandomStateTests {
     /** Rejects invalid checkpoint lengths and an unusable all-zero RNG state. */
     @Test
     void rejectsMalformedRandomRecord() {
-        ByteBuffer shortRecord = ByteBuffer.allocate(Long.BYTES * 2).order(ByteOrder.LITTLE_ENDIAN);
-        assertThrows(IOException.class, () -> RepReader.decodeRandomRecord(shortRecord));
+        ByteBuffer shortRecord = ByteBuffer.allocate(Long.BYTES).order(ByteOrder.LITTLE_ENDIAN);
+        assertThrows(IOException.class, () -> RepReader.decodeRandomRecord(3L, shortRecord));
 
-        ByteBuffer zeroState = ByteBuffer.allocate(Long.BYTES * 3).order(ByteOrder.LITTLE_ENDIAN);
-        zeroState.putLong(3L).putLong(0L).putLong(0L).flip();
-        assertThrows(IOException.class, () -> RepReader.decodeRandomRecord(zeroState));
+        ByteBuffer zeroState = ByteBuffer.allocate(Long.BYTES * 2).order(ByteOrder.LITTLE_ENDIAN);
+        zeroState.putLong(0L).putLong(0L).flip();
+        assertThrows(IOException.class, () -> RepReader.decodeRandomRecord(3L, zeroState));
     }
 }
+
+

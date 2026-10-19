@@ -1,8 +1,10 @@
 package com.enwelk.replaymod;
 
 import java.io.IOException;
+import java.lang.reflect.Field;
 
 import arc.Core;
+import arc.func.Boolp;
 import arc.input.KeyCode;
 import arc.scene.Element;
 import arc.scene.event.InputEvent;
@@ -24,12 +26,15 @@ public class ReplayHud {
     private ReplayDialog dialog;
     private Table playbackControls;
     private TextButton pauseButton;
+    private TextButton restartButton;
     private TextButton speedButton;
     private TextButton seekBackButton;
     private TextButton seekForwardButton;
     private Slider timeline;
     private Label timelineLabel;
     private BaseDialog speedDialog;
+    private BaseDialog playbackErrorDialog;
+    private Label playbackErrorMessage;
 
     /** Creates the HUD overlay for active replay controls. */
     public ReplayHud(ReplayMod mod, ReplayController controller) {
@@ -46,19 +51,16 @@ public class ReplayHud {
             Vars.ui.menufrag.addButton(arc.Core.bundle.get("replaymod.open"), Icon.play, this::open);
             addPlaybackControls();
             Element skipWave = arc.Core.scene.find("skip");
-            if (skipWave != null) {
-                skipWave.addCaptureListener(new InputListener() {
-                    /** Prevents advancing waves during replay playback. */
-                    @Override
-                    public boolean touchDown(InputEvent event, float x, float y, int pointer, KeyCode key) {
-                        return controller.isPlaying();
-                    }
-                });
-                skipWave.update(() -> {
-                    if (skipWave instanceof Button button) {
-                        button.setDisabled(controller.isPlaying());
-                    }
-                });
+            if (skipWave instanceof Button skipButton) {
+                skipButton.addCaptureListener(waveSkipGuard(controller));
+                Boolp hudDisabled = readDisabledProvider(skipButton);
+                if (hudDisabled != null) {
+                    skipButton.setDisabled(waveSkipDisabled(controller, hudDisabled));
+                } else {
+                    Log.warn("ReplayMod cannot gray out the wave skip button; clicks stay blocked during playback");
+                }
+            } else {
+                Log.warn("ReplayMod could not find the HUD wave skip button");
             }
 
             Table hudButton = new Table();
@@ -140,14 +142,55 @@ public class ReplayHud {
         });
     }
 
+    /** Creates the capture listener that consumes wave-skip input during playback. */
+    static InputListener waveSkipGuard(ReplayController controller) {
+        return new InputListener() {
+            /** Stops the event so the HUD button never sees the click while a replay plays. */
+            @Override
+            public boolean touchDown(InputEvent event, float x, float y, int pointer, KeyCode key) {
+                if (!controller.isPlaying()) return false;
+                event.stop();
+                return true;
+            }
+        };
+    }
+
+    /** Combines the playback lock with the HUD's own skip-button condition. */
+    static Boolp waveSkipDisabled(ReplayController controller, Boolp hudCondition) {
+        return () -> controller.isPlaying() || hudCondition.get();
+    }
+
+    /** Reads the button's vanilla disabled condition so playback can extend it. */
+    private static Boolp readDisabledProvider(Button button) {
+        try {
+            Field field = Button.class.getDeclaredField("disabledProvider");
+            field.setAccessible(true);
+            return (Boolp)field.get(button);
+        } catch (ReflectiveOperationException | RuntimeException e) {
+            Log.err("ReplayMod could not read the wave skip button disabled state", e);
+            return null;
+        }
+    }
+
+    /** Opens replay management from the global key binding outside modal UI. */
+    void handleGlobalKeybind() {
+        if (dialog == null || Core.input == null || Core.scene == null ||
+            Core.scene.hasDialog() || Core.scene.hasKeyboard() || Core.scene.hasField()) return;
+        if (Core.input.keyTap(ReplayMod.openReplayKey)) open();
+    }
+
     /** Adds playback controls directly to the game HUD. */
     private void addPlaybackControls() {
         playbackControls = new Table();
         playbackControls.defaults().size(140f, 48f).pad(3f);
         pauseButton = playbackControls.button("", Icon.pause, this::togglePause).get();
+        restartButton = playbackControls.button(
+            Core.bundle.get("replaymod.restart"), Icon.refresh, this::restartPlayback
+        ).get();
         TextButton stopButton = playbackControls.button(
             Core.bundle.get("replaymod.stop"), Icon.cancel, this::stopPlayback
         ).get();
+        playbackControls.row();
         seekBackButton = playbackControls.button(
             Core.bundle.get("replaymod.seek.back"), Icon.left, () -> seekBy(-600L)
         ).get();
@@ -158,7 +201,7 @@ public class ReplayHud {
         playbackControls.row();
         timelineLabel = playbackControls.add("0:00 / 0:00").left().pad(3f).get();
         timeline = new Slider(0f, 1f, 1f, false);
-        playbackControls.add(timeline).colspan(4).growX().height(28f).pad(3f);
+        playbackControls.add(timeline).colspan(2).growX().height(28f).pad(3f);
         timeline.addListener(new InputListener() {
             /** Captures slider gestures and seeks when the pointer is released. */
             @Override
@@ -173,7 +216,7 @@ public class ReplayHud {
                 }
             }
         });
-        playbackControls.setSize(760f, 112f);
+        playbackControls.setSize(450f, 168f);
         playbackControls.setPosition(0f, 12f);
         playbackControls.visible(() -> controller.isPlaying());
         playbackControls.update(() -> {
@@ -183,6 +226,7 @@ public class ReplayHud {
             );
             boolean playing = controller.isPlaying();
             pauseButton.setDisabled(!playing);
+            restartButton.setDisabled(!playing);
             pauseButton.setText(Core.bundle.get(controller.isPlaybackPaused()
                 ? "replaymod.resume"
                 : "replaymod.pause"));
@@ -226,6 +270,19 @@ public class ReplayHud {
         controller.setPlaybackPaused(!controller.isPlaybackPaused());
     }
 
+    /** Restarts the active replay from its embedded save. */
+    private void restartPlayback() {
+        try {
+            controller.restartFromBeginning();
+        } catch (IOException | RuntimeException | LinkageError e) {
+            Log.err("Could not restart replay playback", e);
+            Vars.ui.showInfo(Core.bundle.format(
+                "replaymod.error.playbackRestart",
+                e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage()
+            ));
+        }
+    }
+
     /** Shows the available playback speed multipliers. */
     private void showSpeedOptions() {
         if (controller.isPlaying()) speedDialog.show();
@@ -241,7 +298,7 @@ public class ReplayHud {
     private void stopPlayback() {
         try {
             controller.stopPlaybackManually();
-        } catch (IOException | RuntimeException e) {
+        } catch (IOException | RuntimeException | LinkageError e) {
             Log.err("Could not stop replay playback", e);
         }
     }
@@ -257,3 +314,5 @@ public class ReplayHud {
         dialog.show();
     }
 }
+
+

@@ -6,33 +6,39 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.channels.FileChannel;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 
-import arc.util.io.FastDeflaterOutputStream;
 import com.enwelk.replaymod.Action;
 import com.enwelk.replaymod.ReplayMod;
+import com.enwelk.replaymod.util.VarInt;
+import com.enwelk.replaymod.util.VarLong;
 
+import arc.util.io.FastDeflaterOutputStream;
 import mindustry.Vars;
 import mindustry.io.SaveIO;
 import mindustry.io.SaveOptions;
 import mindustry.world.Tile;
 
 public class RepWriter implements Closeable {
+    public static final String VELOCITY_RECORDING_MARKER = "replaymod-velocity@1";
+
     public static final byte TICK_RECORD = 1;
     public static final byte ACTION_RECORD = 2;
     public static final byte END_RECORD = 3;
     public static final byte RANDOM_RECORD = 4;
+    public static final byte SINGLE_ACTION_RECORD = 5;
 
     private final FileChannel channel;
     private final long randomSeed0, randomSeed1;
     private final ByteBuffer outputBuffer = ByteBuffer.allocate(64 * 1024);
-    private final ByteBuffer tickPayload = ByteBuffer.allocate(Long.BYTES + 7 * Float.BYTES + 2 + 4)
-        .order(ByteOrder.LITTLE_ENDIAN);
     private boolean finished;
+    private long lastRecordTick;
+    private int lastAimX;
+    private int lastAimY;
 
     /** Creates a replay file and writes its save and metadata header. */
     public RepWriter(Path filePath) throws IOException {
@@ -87,6 +93,7 @@ public class RepWriter implements Closeable {
                 mods.add(mod.name + "@" + version);
             }
         });
+        mods.add(VELOCITY_RECORDING_MARKER);
         mods.sort(String::compareTo);
 
         int size = 8;
@@ -116,54 +123,81 @@ public class RepWriter implements Closeable {
     /** Writes one recorded player-state packet. */
     public void writeTickPacket(long tick, float movementX, float movementY,
                                 float aimX, float aimY, boolean shooting,
-                                boolean boosting, Tile mineTile,
-                                float cameraX, float cameraY, float cameraScale) throws IOException {
-        ByteBuffer payload = tickPayload;
-        payload.clear();
-        payload.putLong(tick);
-        payload.putFloat(movementX).putFloat(movementY);
-        payload.putFloat(aimX).putFloat(aimY);
-        payload.putFloat(cameraX).putFloat(cameraY).putFloat(cameraScale);
-        payload.put((byte)(shooting ? 1 : 0));
-        payload.put((byte)(boosting ? 1 : 0));
+                                boolean boosting, Tile mineTile) throws IOException {
+        if (!Float.isFinite(movementX) || !Float.isFinite(movementY) ||
+            !Float.isFinite(aimX) || !Float.isFinite(aimY)) {
+            throw new IOException("Replay controls must be finite");
+        }
+        float length = (float)Math.sqrt(movementX * movementX + movementY * movementY);
+        if (length > 1f) {
+            movementX /= length;
+            movementY /= length;
+        }
+        movementX = arc.math.Mathf.clamp(movementX, -1f, 1f);
+        movementY = arc.math.Mathf.clamp(movementY, -1f, 1f);
+        long deltaTick = tickDelta(tick);
+        int nextAimX = quantizeAim(aimX);
+        int nextAimY = quantizeAim(aimY);
+        long aimDeltaX = (long)nextAimX - lastAimX;
+        long aimDeltaY = (long)nextAimY - lastAimY;
+        ByteBuffer payload = ByteBuffer.allocate(
+            VarLong.size(deltaTick) + 4 + VarLong.sizeSigned(aimDeltaX) +
+                VarLong.sizeSigned(aimDeltaY) + 4
+        ).order(ByteOrder.LITTLE_ENDIAN);
+        VarLong.write(payload, deltaTick);
+        payload.putInt(TickControls.encode(movementX, movementY, shooting, boosting));
+        VarLong.writeSigned(payload, aimDeltaX);
+        VarLong.writeSigned(payload, aimDeltaY);
         if (mineTile == null) {
             payload.putShort((short)-1).putShort((short)-1);
         } else {
             payload.putShort((short)mineTile.x).putShort((short)mineTile.y);
         }
         payload.flip();
-        writeRecord(TICK_RECORD, payload);
+        writeRecord(TICK_RECORD, payload, false);
+        lastRecordTick = tick;
+        lastAimX = nextAimX;
+        lastAimY = nextAimY;
     }
 
-    /** Writes one packet containing the recorded actions for a tick. */
+    /** Writes one packet containing one or more recorded actions for a tick. */
     public void writeActions(long tick, List<Action> actions) throws IOException {
+        if (actions.isEmpty()) return;
         if (actions.size() > Short.MAX_VALUE) {
             throw new IllegalArgumentException("Too many actions in one replay record: " + actions.size());
         }
 
-        int size = Long.BYTES + Short.BYTES;
+        long deltaTick = tickDelta(tick);
+        int size = VarLong.size(deltaTick);
+        if (actions.size() > 1) {
+            size = Math.addExact(size, VarInt.size(actions.size()));
+        }
         for (Action action : actions) {
             size = Math.addExact(size, action.getBufferSize());
         }
 
         ByteBuffer payload = ByteBuffer.allocate(size).order(ByteOrder.LITTLE_ENDIAN);
-        payload.putLong(tick);
-        payload.putShort((short)actions.size());
+        VarLong.write(payload, deltaTick);
+        if (actions.size() > 1) VarInt.write(payload, actions.size());
         for (Action action : actions) {
             action.write(payload);
         }
         payload.flip();
-        writeRecord(ACTION_RECORD, payload);
+        writeRecord(actions.size() == 1 ? SINGLE_ACTION_RECORD : ACTION_RECORD, payload, true);
+        lastRecordTick = tick;
     }
 
     /** Writes the global random generator state before a game update. */
     public void writeRandomState(long tick) throws IOException {
-        ByteBuffer payload = ByteBuffer.allocate(Long.BYTES * 3).order(ByteOrder.LITTLE_ENDIAN);
-        payload.putLong(tick);
+        long deltaTick = tickDelta(tick);
+        ByteBuffer payload = ByteBuffer.allocate(VarLong.size(deltaTick) + Long.BYTES * 2)
+            .order(ByteOrder.LITTLE_ENDIAN);
+        VarLong.write(payload, deltaTick);
         payload.putLong(arc.math.Mathf.rand.seed0);
         payload.putLong(arc.math.Mathf.rand.seed1);
         payload.flip();
-        writeRecord(RANDOM_RECORD, payload);
+        writeRecord(RANDOM_RECORD, payload, false);
+        lastRecordTick = tick;
     }
 
     /** Stores the current global random generator state after replay metadata. */
@@ -176,18 +210,40 @@ public class RepWriter implements Closeable {
     /** Writes the terminal record once to mark the replay's last tick. */
     public void finish(long tick) throws IOException {
         if (finished) return;
-        ByteBuffer payload = ByteBuffer.allocate(Long.BYTES).order(ByteOrder.LITTLE_ENDIAN);
-        payload.putLong(tick).flip();
-        writeRecord(END_RECORD, payload);
+        long deltaTick = tickDelta(tick);
+        ByteBuffer payload = ByteBuffer.allocate(VarLong.size(deltaTick)).order(ByteOrder.LITTLE_ENDIAN);
+        VarLong.write(payload, deltaTick);
+        payload.flip();
+        writeRecord(END_RECORD, payload, false);
+        lastRecordTick = tick;
         finished = true;
     }
 
-    /** Writes a typed record header and its payload. */
-    private void writeRecord(byte type, ByteBuffer payload) throws IOException {
-        ByteBuffer header = ByteBuffer.allocate(1 + Integer.BYTES).order(ByteOrder.LITTLE_ENDIAN);
-        header.put(type).putInt(payload.remaining()).flip();
+    /** Writes a typed record and optional variable-length payload size. */
+    private void writeRecord(byte type, ByteBuffer payload, boolean includeSize) throws IOException {
+        ByteBuffer header = ByteBuffer.allocate(
+            1 + (includeSize ? VarInt.size(payload.remaining()) : 0)
+        ).order(ByteOrder.LITTLE_ENDIAN);
+        header.put(type);
+        if (includeSize) VarInt.write(header, payload.remaining());
+        header.flip();
         writeFully(header);
         writeFully(payload);
+    }
+
+    private long tickDelta(long tick) throws IOException {
+        if (tick < 0L || tick < lastRecordTick) {
+            throw new IOException("Replay records must have nondecreasing non-negative ticks");
+        }
+        return tick - lastRecordTick;
+    }
+
+    private static int quantizeAim(float value) throws IOException {
+        double scaled = (double)value * 8d;
+        if (scaled < Integer.MIN_VALUE || scaled > Integer.MAX_VALUE) {
+            throw new IOException("Replay aim coordinate is outside the supported range");
+        }
+        return (int)Math.round(scaled);
     }
 
     /** Copies a buffer into the writer's output buffer. */
@@ -206,7 +262,9 @@ public class RepWriter implements Closeable {
     private void flushBuffer() throws IOException {
         outputBuffer.flip();
         while (outputBuffer.hasRemaining()) {
-            channel.write(outputBuffer);
+            if (channel.write(outputBuffer) <= 0) {
+                throw new IOException("Could not make progress writing replay data");
+            }
         }
         outputBuffer.clear();
     }
@@ -221,3 +279,5 @@ public class RepWriter implements Closeable {
         }
     }
 }
+
+

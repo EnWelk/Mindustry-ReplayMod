@@ -3,9 +3,14 @@ package com.enwelk.replaymod;
 import java.io.ByteArrayInputStream;
 import java.io.DataInputStream;
 import java.io.IOException;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.util.function.Consumer;
 
+import com.enwelk.replaymod.input.RecordDesktopInput;
+import com.enwelk.replaymod.input.RecordMobileInput;
 import com.enwelk.replaymod.rep.RepReader;
 import com.enwelk.replaymod.rep.RepWriter;
 
@@ -30,6 +35,7 @@ import mindustry.gen.Unit;
 import mindustry.input.Binding;
 import mindustry.input.DesktopInput;
 import mindustry.input.InputHandler;
+import mindustry.input.MobileInput;
 import mindustry.input.PlaceMode;
 import mindustry.io.TypeIO;
 import mindustry.world.Block;
@@ -37,11 +43,36 @@ import mindustry.world.Tile;
 
 public class ReplayController {
     private static final long MAX_SEEK_STEP = 300L;
-    private static final int MAX_SEEK_UPDATES_PER_FRAME = 8;
+
+    private static Method extendedAim = findExtendedAim();
+
+    private static Method findExtendedAim() {
+        try {
+            return Unit.class.getMethod("aim", float.class, float.class, boolean.class);
+        } catch (NoSuchMethodException | RuntimeException e) {
+            Log.info("ReplayMod: aim(x, y, clearTarget) is unavailable on this game build; using aim(x, y)");
+            return null;
+        }
+    }
+
+    private static void aimPlaybackUnit(Unit unit, float x, float y) {
+        Method aim = extendedAim;
+        if (aim != null) {
+            try {
+                aim.invoke(unit, x, y, true);
+                return;
+            } catch (IllegalAccessException | InvocationTargetException | RuntimeException | LinkageError e) {
+                Log.err("ReplayMod: extended unit aim failed; falling back to aim(x, y)", e);
+                extendedAim = null;
+            }
+        }
+        unit.aim(x, y);
+    }
 
     private InputHandler previousInput;
     private RepWriter writer;
-    private ReplayRecordInput recordingInput;
+    private InputHandler recordingInput;
+    private Runnable recordingCloser;
     private RepReader reader;
     private Viewer playbackInput;
     private Path playbackPath;
@@ -54,10 +85,12 @@ public class ReplayController {
     private long seekTarget = -1L;
     private boolean playbackPaused;
     private boolean pauseAfterSeek;
+    private boolean playbackVelocitySemantics;
     private int playbackSpeed = 1;
     private Axis previousSkipWaveBinding;
     private Runnable playbackFinished = () -> {};
     private Runnable playbackStopped = () -> {};
+    private Consumer<String> playbackError = ignored -> {};
 
     /** Begins recording the current offline game to a replay file. */
     public void startRecording(Path path) throws IOException {
@@ -68,19 +101,36 @@ public class ReplayController {
         if (Vars.control == null || Vars.player == null || Vars.state == null || !Vars.state.isGame()) {
             throw new IllegalStateException("Recording can only start during a game");
         }
-        if (!(Vars.control.input instanceof DesktopInput)) {
-            throw new IllegalStateException("Replay recording currently requires desktop input");
+        InputHandler currentInput = Vars.control.input;
+        if (currentInput == null) {
+            throw new IllegalStateException("No active input handler");
         }
-
         RepWriter newWriter = new RepWriter(path);
         try {
-            previousInput = Vars.control.input;
+            previousInput = currentInput;
             writer = newWriter;
-            recordingInput = new ReplayRecordInput(writer);
+            if (currentInput instanceof DesktopInput) {
+                RecordDesktopInput input = new RecordDesktopInput(newWriter);
+                recordingInput = input;
+                recordingCloser = input::close;
+            } else if (currentInput instanceof MobileInput) {
+                RecordMobileInput input = new RecordMobileInput(newWriter);
+                recordingInput = input;
+                recordingCloser = input::close;
+            } else {
+                throw new IllegalStateException("Replay recording is not supported for this input method");
+            }
             Vars.control.setInput(recordingInput);
-        } catch (RuntimeException e) {
-            if (recordingInput != null) recordingInput.close();
+        } catch (RuntimeException | LinkageError e) {
+            if (recordingCloser != null) {
+                try {
+                    recordingCloser.run();
+                } catch (RuntimeException | LinkageError closeError) {
+                    e.addSuppressed(closeError);
+                }
+            }
             recordingInput = null;
+            recordingCloser = null;
             writer = null;
             previousInput = null;
             try {
@@ -117,6 +167,11 @@ public class ReplayController {
     void recordRandomState() {
         if (recordingInput == null || writer == null || Vars.state == null) return;
         try {
+            if (recordingInput instanceof RecordDesktopInput desktop) {
+                desktop.flushCompletedTicks(Vars.state.tick);
+            } else if (recordingInput instanceof RecordMobileInput mobile) {
+                mobile.flushCompletedTicks(Vars.state.tick);
+            }
             writer.writeRandomState((long)Math.floor(Vars.state.tick));
         } catch (IOException e) {
             Log.err("Failed to write replay random state", e);
@@ -146,6 +201,11 @@ public class ReplayController {
     /** Sets the callback invoked when playback is manually stopped. */
     public void setPlaybackStoppedListener(Runnable listener) {
         playbackStopped = listener == null ? () -> {} : listener;
+    }
+
+    /** Sets the callback invoked when playback terminates because of a replay error. */
+    public void setPlaybackErrorListener(Consumer<String> listener) {
+        playbackError = listener == null ? ignored -> {} : listener;
     }
 
     /** Stops playback manually and notifies the stopped listener. */
@@ -181,8 +241,8 @@ public class ReplayController {
         if (target < currentTick) {
             try {
                 restartPlayback();
-            } catch (IOException | RuntimeException e) {
-                Log.err("Could not restart replay for backward seek", e);
+            } catch (IOException | RuntimeException | LinkageError e) {
+                failPlayback("Could not restart replay for backward seek", e);
                 return;
             }
             if (reader == null) return;
@@ -199,15 +259,12 @@ public class ReplayController {
         if (reader == null || seekTarget < 0L || Vars.state == null) return;
         long target = seekTarget;
         try {
-            int updates = 0;
-            while (reader != null && currentTick < target &&
-                updates < MAX_SEEK_UPDATES_PER_FRAME) {
-                long replayTick = playbackOrigin + currentTick;
-                if (nextRecord != null && nextRecord.tick() <= replayTick) {
-                    updatePlayback();
-                    if (reader == null) return;
-                    continue;
-                }
+            long replayTick = playbackOrigin + currentTick;
+            if (nextRecord != null && nextRecord.tick() <= replayTick) {
+                updatePlayback();
+            }
+            if (reader != null && currentTick < target) {
+                replayTick = playbackOrigin + currentTick;
                 long step = Math.min(MAX_SEEK_STEP, target - currentTick);
                 if (nextRecord != null) {
                     long untilRecord = nextRecord.tick() - replayTick;
@@ -223,20 +280,13 @@ public class ReplayController {
                 Vars.state.tick = before + simulationStep;
                 currentTick = (long)Math.floor(Vars.state.tick);
                 updatePlayback();
-                updates++;
             }
+        } catch (RuntimeException | LinkageError e) {
+            failPlayback("Replay seek failed", e);
         } finally {
             if (reader != null) {
-                installPlaybackTimeScale();
-
-                if (currentTick >= target) {
-                    seekTarget = -1L;
-                    playbackPaused = pauseAfterSeek;
-
-                    if (playbackPaused) {
-                        Vars.state.set(GameState.State.paused);
-                    }
-                }
+                if (currentTick >= target) completeSeek();
+                else installPlaybackTimeScale();
             }
         }
     }
@@ -255,12 +305,13 @@ public class ReplayController {
     void syncPlaybackClock() {
         if (reader == null || playbackInput == null || isPlaybackPaused() ||
             seekTarget >= 0L || Vars.state == null || !Vars.state.isPlaying()) return;
-        updatePlayback();
-        for (int i = 1; i < playbackSpeed && reader != null &&
-            Vars.state != null && Vars.state.isPlaying(); i++) {
-            Vars.logic.update();
-            updatePlayback();
+        if (playbackSpeed > 1) {
+            float frameDelta = Core.graphics.getDeltaTime() * 60f;
+            if (Float.isFinite(frameDelta) && frameDelta > 0f) {
+                Vars.state.tick += frameDelta * (playbackSpeed - 1);
+            }
         }
+        updatePlayback();
     }
 
     /** Returns whether playback or the game state is paused. */
@@ -282,6 +333,16 @@ public class ReplayController {
         }
     }
 
+    /** Reloads the embedded save and starts the current replay from its first record. */
+    public void restartFromBeginning() throws IOException {
+        if (reader == null) return;
+        restartPlayback();
+        seekTarget = -1L;
+        playbackPaused = false;
+        installPlaybackTimeScale();
+        if (Vars.state != null) Vars.state.set(GameState.State.playing);
+    }
+
     /** Starts playback and replaces the active game input handler. */
     public void startPlayback(Path path) throws IOException {
         ensureIdle();
@@ -297,6 +358,7 @@ public class ReplayController {
         try {
             newReader.scanTimeline();
             restoreReplayRandomState(newReader);
+            playbackVelocitySemantics = newReader.velocityRecorded();
             previousInput = input;
             reader = newReader;
             playbackPath = path;
@@ -315,11 +377,11 @@ public class ReplayController {
             installPlaybackTimeScale();
             Vars.state.set(GameState.State.playing);
             updatePlayback();
-        } catch (IOException | RuntimeException e) {
+        } catch (IOException | RuntimeException | LinkageError e) {
             if (Vars.control != null && Vars.control.input == playbackInput) {
                 try {
                     Vars.control.setInput(input);
-                } catch (RuntimeException restoreError) {
+                } catch (RuntimeException | LinkageError restoreError) {
                     e.addSuppressed(restoreError);
                 }
             }
@@ -329,7 +391,15 @@ public class ReplayController {
             lastTick = null;
             lastRandomState = null;
             playbackPaused = false;
+            playbackVelocitySemantics = false;
+            seekTarget = -1L;
             previousInput = null;
+            playbackPath = null;
+            if (previousSkipWaveBinding != null) {
+                Binding.skipWave.value = previousSkipWaveBinding;
+                previousSkipWaveBinding = null;
+            }
+            restoreDefaultTimeScale();
             try {
                 newReader.close();
             } catch (IOException closeError) {
@@ -342,32 +412,36 @@ public class ReplayController {
     /** Stops the active recording or playback session. */
     public void stop() throws IOException {
         if (recordingInput != null) {
-            ReplayRecordInput oldInput = recordingInput;
+            InputHandler oldInput = recordingInput;
+            Runnable oldCloser = recordingCloser;
             RepWriter oldWriter = writer;
             recordingInput = null;
+            recordingCloser = null;
             writer = null;
-            oldInput.close();
             try {
-                if (Vars.control != null && Vars.control.input == oldInput && previousInput != null) {
-                    Vars.control.setInput(previousInput);
+                if (oldCloser != null) {
+                    oldCloser.run();
                 }
             } finally {
-                previousInput = null;
-                if (oldWriter != null) {
-                    try {
-                        oldWriter.finish(Vars.state == null ? 0 : Math.round(Vars.state.tick));
-                    } catch (IOException finishError) {
-                        try {
-                            oldWriter.close();
-                        } catch (IOException closeError) {
-                            finishError.addSuppressed(closeError);
-                        }
-                        throw finishError;
+                try {
+                    if (Vars.control != null && Vars.control.input == oldInput && previousInput != null) {
+                        Vars.control.setInput(previousInput);
                     }
-                    try {
+                } finally {
+                    previousInput = null;
+
+                    if (oldWriter != null) {
+                        try {
+                            oldWriter.finish(Vars.state == null ? 0 : Math.round(Vars.state.tick));
+                        } catch (IOException finishError) {
+                            try {
+                                oldWriter.close();
+                            } catch (IOException closeError) {
+                                finishError.addSuppressed(closeError);
+                            }
+                            throw finishError;
+                        }
                         oldWriter.close();
-                    } catch (IOException closeError) {
-                        throw closeError;
                     }
                 }
             }
@@ -390,6 +464,7 @@ public class ReplayController {
         this.currentTick = currentTick;
         long replayTick = playbackOrigin + currentTick;
         boolean finished = false;
+        String failure = null;
         try {
             while (nextRecord != null && nextRecord.tick() <= replayTick) {
                 if (nextRecord instanceof RepReader.TickRecord tickRecord) {
@@ -407,59 +482,85 @@ public class ReplayController {
                 }
                 nextRecord = reader.readNext();
             }
-            if (nextRecord == null && !finished) finished = true;
-        } catch (IOException | RuntimeException e) {
+            if (nextRecord == null && !finished) {
+                throw new IOException("Replay is missing its end record");
+            }
+        } catch (IOException | RuntimeException | LinkageError e) {
             Log.err("Replay playback stopped because a replay record could not be read", e);
             finished = true;
+            failure = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
         }
 
-        applyLastTick();
         if (finished) {
             try {
                 stopPlayback();
-                playbackFinished.run();
-            } catch (IOException e) {
+            } catch (IOException | RuntimeException | LinkageError e) {
                 Log.err("Failed to close replay after playback", e);
+                String closeFailure = e.getMessage() == null
+                    ? e.getClass().getSimpleName()
+                    : e.getMessage();
+                failure = failure == null ? closeFailure : failure + "\n" + closeFailure;
             }
+            if (failure == null) playbackFinished.run();
+            else playbackError.accept(failure);
         }
     }
 
-    /** Applies the most recent recorded movement, aim, and player state. */
-    private void applyLastTick() {
-        if (lastTick == null || Vars.player == null || Vars.player.unit() == null) return;
-        Player player = Vars.player;
-        Unit unit = player.unit();
-        player.shooting = lastTick.shooting();
-        player.boosting = lastTick.boosting();
-        boolean boosted = unit instanceof Mechc && unit.isFlying();
-        boolean aimAtTarget = unit.type.omniMovement && player.shooting &&
-            unit.type.hasWeapons() && unit.type.faceTarget && !boosted;
-        unit.lookAt(aimAtTarget
-            ? unit.angleTo(lastTick.aimX(), lastTick.aimY())
-            : unit.prefRotation());
-        playbackInput.movement.set(lastTick.movementX(), lastTick.movementY());
-        unit.movePref(playbackInput.movement);
-        unit.aim(lastTick.aimX(), lastTick.aimY(), true);
-        if (lastTick.mineX() < 0 || lastTick.mineY() < 0) {
-            unit.mineTile = null;
-        } else {
-            unit.mineTile = Vars.world.tile(lastTick.mineX(), lastTick.mineY());
+    /** Applies the most recent recorded movement, aim, and player state before a game update. */
+    void maintainPlaybackMovement() {
+        if (reader == null || lastTick == null || playbackInput == null ||
+            Vars.state == null || !Vars.state.isGame() || Vars.world == null ||
+            Vars.player == null || Vars.player.unit() == null) {
+            return;
         }
-        player.mouseX = lastTick.aimX();
-        player.mouseY = lastTick.aimY();
-        maintainPlaybackWeapons();
+        try {
+            Player player = Vars.player;
+            Unit unit = player.unit();
+            player.shooting = lastTick.shooting();
+            player.boosting = lastTick.boosting();
+            playbackInput.movement
+                .set(lastTick.movementX(), lastTick.movementY())
+                .limit(1f)
+                .scl(unit.speed());
+            unit.movePref(playbackInput.movement);
+            if (playbackVelocitySemantics) {
+                float tracking = unit.speed() * unit.type.accel / 2f +
+                    unit.speed() * Math.max(unit.drag(), 0f) * Time.delta;
+                unit.vel.approachDelta(playbackInput.movement, tracking);
+            }
+            boolean boosted = unit instanceof Mechc && unit.isFlying();
+            boolean aimAtTarget = unit.type.omniMovement && player.shooting &&
+                unit.type.hasWeapons() && unit.type.faceTarget && !boosted;
+            unit.lookAt(aimAtTarget
+                ? unit.angleTo(lastTick.aimX(), lastTick.aimY())
+                : unit.prefRotation());
+            aimPlaybackUnit(unit, lastTick.aimX(), lastTick.aimY());
+            if (lastTick.mineX() < 0 || lastTick.mineY() < 0) {
+                unit.mineTile = null;
+            } else {
+                unit.mineTile = Vars.world.tile(lastTick.mineX(), lastTick.mineY());
+            }
+            player.mouseX = lastTick.aimX();
+            player.mouseY = lastTick.aimY();
+        } catch (RuntimeException | LinkageError e) {
+            failPlayback("Replay movement update failed", e);
+        }
     }
 
     /** Reapplies recorded weapon flags throughout each simulated game update. */
     void maintainPlaybackWeapons() {
         if (reader == null || lastTick == null ||
             Vars.player == null || Vars.player.unit() == null) return;
-        Player player = Vars.player;
-        Unit unit = player.unit();
-        player.shooting = lastTick.shooting();
-        player.boosting = lastTick.boosting();
-        boolean boosted = unit instanceof Mechc && unit.isFlying();
-        unit.controlWeapons(true, lastTick.shooting() && !boosted);
+        try {
+            Player player = Vars.player;
+            Unit unit = player.unit();
+            player.shooting = lastTick.shooting();
+            player.boosting = lastTick.boosting();
+            boolean boosted = unit instanceof Mechc && unit.isFlying();
+            unit.controlWeapons(true, lastTick.shooting() && !boosted);
+        } catch (RuntimeException | LinkageError e) {
+            failPlayback("Replay weapon update failed", e);
+        }
     }
 
     /** Applies one recorded gameplay action to the active replay world. */
@@ -507,6 +608,11 @@ public class ReplayController {
             }
         } else if (action instanceof Action.PayloadAction payload) {
             applyPayload(payload, player);
+        } else if (action instanceof Action.Teleport teleport) {
+            if (player.unit() != null && Float.isFinite(teleport.x) && Float.isFinite(teleport.y)) {
+                player.unit().set(teleport.x, teleport.y);
+                player.unit().vel.setZero();
+            }
         } else if (action instanceof Action.Command command) {
             applyCommand(command, player);
         }
@@ -600,6 +706,7 @@ public class ReplayController {
         lastTick = null;
         lastRandomState = null;
         playbackPaused = false;
+        playbackVelocitySemantics = false;
         seekTarget = -1L;
         try {
             if (Vars.player != null) {
@@ -615,15 +722,21 @@ public class ReplayController {
             if (Vars.control != null && Vars.control.input == oldInput && previousInput != null) {
                 Vars.control.setInput(previousInput);
             }
-            if (previousSkipWaveBinding != null) {
-                Binding.skipWave.value = previousSkipWaveBinding;
-                previousSkipWaveBinding = null;
-            }
-            restoreDefaultTimeScale();
         } finally {
             previousInput = null;
             playbackPath = null;
-            if (oldReader != null) oldReader.close();
+            try {
+                if (previousSkipWaveBinding != null) {
+                    Binding.skipWave.value = previousSkipWaveBinding;
+                    previousSkipWaveBinding = null;
+                }
+            } finally {
+                try {
+                    restoreDefaultTimeScale();
+                } finally {
+                    if (oldReader != null) oldReader.close();
+                }
+            }
         }
     }
 
@@ -636,6 +749,7 @@ public class ReplayController {
             restoreReplayRandomState(restarted);
             RepReader oldReader = reader;
             reader = restarted;
+            playbackVelocitySemantics = restarted.velocityRecorded();
             playbackOrigin = restarted.firstTick();
             durationTicks = Math.max(0L, restarted.endTick() - playbackOrigin);
             nextRecord = restarted.readNext();
@@ -647,7 +761,7 @@ public class ReplayController {
             if (Vars.control.input != playbackInput) Vars.control.setInput(playbackInput);
             oldReader.close();
             updatePlayback();
-        } catch (IOException | RuntimeException e) {
+        } catch (IOException | RuntimeException | LinkageError e) {
             try {
                 restarted.close();
             } catch (IOException closeError) {
@@ -662,7 +776,7 @@ public class ReplayController {
         Time.setDeltaProvider(() -> {
             float delta = Core.graphics.getDeltaTime() * 60f;
             if (Float.isNaN(delta) || Float.isInfinite(delta)) delta = 1f;
-            return Mathf.clamp(delta, 0.0001f, Vars.maxDeltaClient);
+            return Mathf.clamp(delta, 0.0001f, Vars.maxDeltaClient) * playbackSpeed;
         });
     }
 
@@ -682,6 +796,25 @@ public class ReplayController {
         }
     }
 
+    private void failPlayback(String context, Throwable failure) {
+        Log.err(context, failure);
+        String message = failure.getMessage() == null
+            ? failure.getClass().getSimpleName()
+            : failure.getMessage();
+        if (reader != null) {
+            try {
+                stopPlayback();
+            } catch (IOException | RuntimeException | LinkageError closeFailure) {
+                Log.err("Failed to close replay after an error", closeFailure);
+                String closeMessage = closeFailure.getMessage() == null
+                    ? closeFailure.getClass().getSimpleName()
+                    : closeFailure.getMessage();
+                message += "\n" + closeMessage;
+            }
+        }
+        playbackError.accept(message);
+    }
+
     /** Rejects a new replay operation while another session is active. */
     private void ensureIdle() {
         if (recordingInput != null || reader != null) {
@@ -690,3 +823,5 @@ public class ReplayController {
     }
 
 }
+
+

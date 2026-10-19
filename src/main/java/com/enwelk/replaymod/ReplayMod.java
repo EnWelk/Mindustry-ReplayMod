@@ -5,6 +5,8 @@ import java.nio.file.Path;
 
 import arc.Core;
 import arc.Events;
+import arc.input.KeyBind;
+import arc.input.KeyCode;
 import arc.util.CommandHandler;
 import arc.util.Log;
 import arc.util.serialization.Jval;
@@ -17,6 +19,9 @@ import mindustry.mod.Mods.LoadedMod;
 
 public class ReplayMod extends Mod {
     private static final String SETTINGS_PREFIX = "replaymod-";
+    static final KeyBind openReplayKey = KeyBind.add(
+        "replaymod-open", KeyCode.f9, "replaymod"
+    );
     private static float replayVersion;
 
     private final ReplayController controller = new ReplayController();
@@ -26,12 +31,12 @@ public class ReplayMod extends Mod {
     static public float ofLeft;
     static public float ofTop;
 
-    /** Initializes replay systems, UI, settings, and lifecycle listeners. */
     @Override
     public void init() {
         loadMetadataSettings();
         loadConfiguration();
         replayHud.load();
+        Events.run(Trigger.update, replayHud::handleGlobalKeybind);
         Events.on(PlayEvent.class, event -> {
             try {
                 controller.stopPlaybackForNewGame();
@@ -40,10 +45,11 @@ public class ReplayMod extends Mod {
             }
             showIntro();
         });
+
         Events.run(Trigger.beforeGameUpdate, controller::applyPlaybackRandomState);
-        Events.run(Trigger.beforeGameUpdate, controller::recordRandomState);
+        Events.run(Trigger.beforeGameUpdate, controller::maintainPlaybackMovement);
+        Events.run(Trigger.afterGameUpdate, controller::recordRandomState);
         Events.run(Trigger.beforeGameUpdate, controller::maintainPlaybackWeapons);
-        Events.run(Trigger.afterGameUpdate, controller::maintainPlaybackWeapons);
         Events.on(DisposeEvent.class, event -> {
             if (!controller.isActive()) return;
             try {
@@ -54,7 +60,6 @@ public class ReplayMod extends Mod {
         });
     }
 
-    /** Shows the welcome dialog once a world is ready. */
     private void showIntro() {
         if (IntroDialog.isDismissed()) return;
         Core.app.post(() -> {
@@ -69,7 +74,6 @@ public class ReplayMod extends Mod {
         });
     }
 
-    /** Loads replay version metadata from mod.hjson into runtime state. */
     private void loadMetadataSettings() {
         LoadedMod loadedMod = Vars.mods.getMod(getClass());
         if (loadedMod == null) {
@@ -94,7 +98,6 @@ public class ReplayMod extends Mod {
         replayVersion = version;
     }
 
-    /** Loads and applies the saved replay-button position. */
     private void loadConfiguration() {
         Core.settings.defaults(
             SETTINGS_PREFIX + "of-right", 0f,
@@ -106,7 +109,6 @@ public class ReplayMod extends Mod {
         ofTop = Core.settings.getFloat(SETTINGS_PREFIX + "of-top");
     }
 
-    /** Persists the replay button's new screen position. */
     void saveButtonPosition(float x, float y) {
         ofLeft = x;
         ofTop = y;
@@ -114,34 +116,29 @@ public class ReplayMod extends Mod {
         Core.settings.put(SETTINGS_PREFIX + "of-top", y);
     }
 
-    /** Returns the replay format version configured in mod metadata. */
     public static float replayVersion() {
         return replayVersion;
     }
 
-    /** Returns the saved right-side button offset. */
     public float ofRight() {
         return ofRight;
     }
 
-    /** Returns the saved left-side button offset. */
     public float ofLeft() {
         return ofLeft;
     }
 
-    /** Returns the saved top-side button offset. */
     public float ofTop() {
         return ofTop;
     }
 
-    /** Registers commands for recording, stopping, and playing replays. */
     @Override
     public void registerClientCommands(CommandHandler handler) {
         handler.register("replay-record", "<name>", "Start recording to a replay file", args -> {
             try {
                 controller.startRecording(replayPath(args[0]));
                 Log.info("Replay recording started: @", args[0]);
-            } catch (IOException | RuntimeException e) {
+            } catch (IOException | RuntimeException | LinkageError e) {
                 Log.err("Failed to start replay recording", e);
             }
         });
@@ -149,7 +146,7 @@ public class ReplayMod extends Mod {
             try {
                 controller.stop();
                 Log.info("Replay stopped");
-            } catch (IOException | RuntimeException e) {
+            } catch (IOException | RuntimeException | LinkageError e) {
                 Log.err("Failed to stop replay", e);
             }
         });
@@ -157,13 +154,12 @@ public class ReplayMod extends Mod {
             try {
                 controller.startPlayback(replayPath(args[0]));
                 Log.info("Replay playback started: @", args[0]);
-            } catch (IOException | RuntimeException e) {
+            } catch (IOException | RuntimeException | LinkageError e) {
                 Log.err("Failed to start replay playback", e);
             }
         });
     }
 
-    /** Resolves a validated replay name inside the replay directory. */
     Path replayPath(String name) throws IOException {
         if (name.isBlank() || name.equals(".") || name.equals("..") ||
             !name.matches("[A-Za-z0-9._-]+")) {
@@ -175,8 +171,9 @@ public class ReplayMod extends Mod {
         return directory.child(name + ".rep").file().toPath();
     }
 
-    /** Returns the directory used to store replay files. */
     arc.files.Fi replayDirectory() {
         return Vars.dataDirectory.child("replays");
     }
 }
+
+

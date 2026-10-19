@@ -15,6 +15,8 @@ import java.util.List;
 
 import com.enwelk.replaymod.Action;
 import com.enwelk.replaymod.ReplayMod;
+import com.enwelk.replaymod.util.VarInt;
+import com.enwelk.replaymod.util.VarLong;
 
 import arc.files.Fi;
 import arc.math.Mathf;
@@ -22,7 +24,7 @@ import arc.util.io.FastDeflaterOutputStream;
 import mindustry.io.SaveIO;
 
 public class RepReader implements Closeable {
-    private static final int MAX_MAP_SIZE = 256 * 1024 * 1024;
+    private static final int MAX_MAP_SIZE = 32 * 1024 * 1024;
     private static final int MAX_RECORD_SIZE = 256 * 1024 * 1024;
     private static final int MAX_MOD_METADATA_SIZE = 1024 * 1024;
     private static final int MAX_MOD_COUNT = 4096;
@@ -30,15 +32,19 @@ public class RepReader implements Closeable {
     private final FileChannel channel;
     private final Path filePath;
     private final ByteBuffer inputBuffer = ByteBuffer.allocate(64 * 1024);
+    private final ByteBuffer singleByte = ByteBuffer.allocate(1);
     private final float version;
     private List<String> usedMods = List.of();
+    private boolean velocityRecorded;
     private long randomSeed0, randomSeed1;
     private boolean hasRandomState;
     private long recordsStart;
     private long firstTick = Long.MAX_VALUE;
     private long endTick;
+    private long lastRecordTick;
+    private int lastAimX;
+    private int lastAimY;
 
-    /** Opens a replay and reads its header and embedded map. */
     public RepReader(Path filePath) throws IOException {
         this.filePath = filePath;
         channel = FileChannel.open(filePath, StandardOpenOption.READ);
@@ -55,34 +61,43 @@ public class RepReader implements Closeable {
         }
     }
 
-    /** Returns the replay file format version. */
     public float version() {
         return version;
     }
 
-    /** Returns mods recorded in the replay header. */
     public List<String> usedMods() {
         return usedMods;
     }
 
-    /** Returns whether this replay contains a recorded global random state. */
+    public boolean velocityRecorded() {
+        return velocityRecorded;
+    }
+
+    static boolean hasVelocityMarker(List<String> mods) {
+        return mods.contains(RepWriter.VELOCITY_RECORDING_MARKER);
+    }
+
+    static List<String> withoutVelocityMarker(List<String> mods) {
+        if (!hasVelocityMarker(mods)) return mods;
+        List<String> filtered = new ArrayList<>(mods);
+        filtered.remove(RepWriter.VELOCITY_RECORDING_MARKER);
+        return List.copyOf(filtered);
+    }
+
     public boolean hasRandomState() {
         return hasRandomState;
     }
 
-    /** Returns the first recorded random generator seed. */
     public long randomSeed0() {
         if (!hasRandomState) throw new IllegalStateException("Replay has no random state");
         return randomSeed0;
     }
 
-    /** Returns the second recorded random generator seed. */
     public long randomSeed1() {
         if (!hasRandomState) throw new IllegalStateException("Replay has no random state");
         return randomSeed1;
     }
 
-    /** Reads replay mod metadata without loading the embedded save into the active world. */
     public static List<String> readUsedMods(Path filePath) throws IOException {
         try (FileChannel file = FileChannel.open(filePath, StandardOpenOption.READ)) {
             ByteBuffer header = ByteBuffer.allocate(3 + Float.BYTES + Integer.BYTES)
@@ -109,7 +124,6 @@ public class RepReader implements Closeable {
         }
     }
 
-    /** Validates an import's framing without loading its embedded map into the active world. */
     public static void validateForImport(Path filePath) throws IOException {
         try (FileChannel file = FileChannel.open(filePath, StandardOpenOption.READ)) {
             ByteBuffer header = ByteBuffer.allocate(3 + Float.BYTES + Integer.BYTES)
@@ -136,7 +150,6 @@ public class RepReader implements Closeable {
         }
     }
 
-    /** Scans the replay timeline without retaining every record in memory. */
     public void scanTimeline() throws IOException {
         resetRecords();
         firstTick = Long.MAX_VALUE;
@@ -165,24 +178,23 @@ public class RepReader implements Closeable {
         resetRecords();
     }
 
-    /** Returns the first recorded game tick, used as the replay's time origin. */
     public long firstTick() {
         return firstTick;
     }
 
-    /** Returns the end tick in the original replay timeline. */
     public long endTick() {
         return endTick;
     }
 
-    /** Rewinds record reading to the first record after the embedded save. */
     private void resetRecords() throws IOException {
         channel.position(recordsStart);
         inputBuffer.position(0);
         inputBuffer.limit(0);
+        lastRecordTick = 0L;
+        lastAimX = 0;
+        lastAimY = 0;
     }
 
-    /** Reads the current-format header and seeds RNG before loading the map. */
     private float readHeader() throws IOException {
         ByteBuffer header = ByteBuffer.allocate(3 + Float.BYTES + Integer.BYTES)
             .order(ByteOrder.LITTLE_ENDIAN);
@@ -207,7 +219,7 @@ public class RepReader implements Closeable {
         readFully(ByteBuffer.wrap(mapData), false);
         usedMods = readModMetadata();
         readRandomState();
-        Mathf.rand.setState(randomSeed0, randomSeed1);
+
         Path tempPath = Files.createTempFile("replay-map", ".msav");
         try {
             if (isUncompressedSave(mapData)) {
@@ -221,11 +233,11 @@ public class RepReader implements Closeable {
         } finally {
             Files.deleteIfExists(tempPath);
         }
+
         recordsStart = channel.position() - inputBuffer.remaining();
         return fileVersion;
     }
 
-    /** Reads the recorded global RNG state from the replay header. */
     private void readRandomState() throws IOException {
         ByteBuffer state = ByteBuffer.allocate(Long.BYTES * 2).order(ByteOrder.LITTLE_ENDIAN);
         readFully(state, false);
@@ -236,7 +248,6 @@ public class RepReader implements Closeable {
         hasRandomState = true;
     }
 
-    /** Reads the fixed-width RNG state from a channel. */
     private static RandomState readRandomState(FileChannel file) throws IOException {
         ByteBuffer state = ByteBuffer.allocate(Long.BYTES * 2).order(ByteOrder.LITTLE_ENDIAN);
         readChannelFully(file, state);
@@ -244,7 +255,6 @@ public class RepReader implements Closeable {
         return decodeRandomState(state);
     }
 
-    /** Decodes the two fixed-width seeds in a replay header. */
     static RandomState decodeRandomState(ByteBuffer state) throws IOException {
         if (state.remaining() != Long.BYTES * 2) {
             throw new IOException("Invalid replay random state size");
@@ -257,7 +267,6 @@ public class RepReader implements Closeable {
         return new RandomState(seed0, seed1);
     }
 
-    /** Reads mod metadata from this reader's current channel position. */
     private List<String> readModMetadata() throws IOException {
         ByteBuffer metadataHeader = ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN);
         readFully(metadataHeader, false);
@@ -266,17 +275,17 @@ public class RepReader implements Closeable {
             metadataHeader.get() != 'D' || metadataHeader.get() != 'S') {
             throw new IOException("Invalid replay mod metadata header");
         }
-        return readModNames(metadataHeader.getInt(), this::readMetadataBytes);
+        List<String> mods = readModNames(metadataHeader.getInt(), this::readMetadataBytes);
+        velocityRecorded = hasVelocityMarker(mods);
+        return withoutVelocityMarker(mods);
     }
 
-    /** Reads a fixed number of metadata bytes from this replay. */
     private byte[] readMetadataBytes(int size) throws IOException {
         ByteBuffer data = ByteBuffer.allocate(size);
         readFully(data, false);
         return data.array();
     }
 
-    /** Reads mod metadata from a channel without creating a replay reader. */
     private static List<String> readModMetadata(FileChannel file) throws IOException {
         ByteBuffer metadataHeader = ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN);
         readChannelFully(file, metadataHeader);
@@ -285,14 +294,13 @@ public class RepReader implements Closeable {
             metadataHeader.get() != 'D' || metadataHeader.get() != 'S') {
             throw new IOException("Invalid replay mod metadata header");
         }
-        return readModNames(metadataHeader.getInt(), size -> {
+        return withoutVelocityMarker(readModNames(metadataHeader.getInt(), size -> {
             ByteBuffer data = ByteBuffer.allocate(size);
             readChannelFully(file, data);
             return data.array();
-        });
+        }));
     }
 
-    /** Decodes and validates the names in a replay's mod list. */
     private static List<String> readModNames(int count, MetadataReader reader) throws IOException {
         if (count < 0 || count > MAX_MOD_COUNT) {
             throw new IOException("Invalid replay mod count: " + count);
@@ -316,29 +324,26 @@ public class RepReader implements Closeable {
         return List.copyOf(mods);
     }
 
-    /** Checks whether a replay format version is supported. */
     private static boolean isSupportedVersion(float version) {
         return Float.compare(version, ReplayMod.replayVersion()) == 0;
     }
 
-    /** Fills a buffer from a file channel or reports truncation. */
     private static void readChannelFully(FileChannel channel, ByteBuffer buffer) throws IOException {
         while (buffer.hasRemaining()) {
-            if (channel.read(buffer) < 0) throw new IOException("Replay file is truncated");
+            int count = channel.read(buffer);
+            if (count < 0) throw new IOException("Replay file is truncated");
+            if (count == 0) throw new IOException("Could not make progress reading replay data");
         }
     }
 
     private interface MetadataReader {
-        /** Reads exactly the requested number of metadata bytes. */
         byte[] readBytes(int size) throws IOException;
 
-        /** Copies the requested metadata bytes into a buffer. */
         default void readFully(ByteBuffer buffer) throws IOException {
             buffer.put(readBytes(buffer.remaining()));
         }
     }
 
-    /** Checks whether the embedded save uses Mindustry's uncompressed header. */
     private boolean isUncompressedSave(byte[] data) {
         return data.length >= SaveIO.header.length &&
             data[0] == SaveIO.header[0] &&
@@ -347,84 +352,62 @@ public class RepReader implements Closeable {
             data[3] == SaveIO.header[3];
     }
 
-    /** Reads and decodes the next replay record, or returns null at clean EOF. */
     public ReplayRecord readNext() throws IOException {
-        ByteBuffer recordHeader = ByteBuffer.allocate(1 + Integer.BYTES).order(ByteOrder.LITTLE_ENDIAN);
-        if (!readFully(recordHeader, true)) {
-            return null;
-        }
-        recordHeader.flip();
-
-        byte type = recordHeader.get();
-        int payloadSize = recordHeader.getInt();
-        if (payloadSize < Long.BYTES || payloadSize > MAX_RECORD_SIZE) {
-            throw new IOException("Invalid replay record size: " + payloadSize);
-        }
-
-        ByteBuffer payload = ByteBuffer.allocate(payloadSize).order(ByteOrder.LITTLE_ENDIAN);
-        readFully(payload, false);
-        payload.flip();
-
+        singleByte.clear();
+        if (!readFully(singleByte, true)) return null;
+        byte type = singleByte.get(0);
         try {
-            if (type == RepWriter.TICK_RECORD) return readTick(payload);
-            if (type == RepWriter.ACTION_RECORD) return readActions(payload);
-            if (type == RepWriter.RANDOM_RECORD) return readRandomRecord(payload);
-            if (type == RepWriter.END_RECORD) {
-                if (payload.remaining() != Long.BYTES) {
-                    throw new IOException("Invalid replay end record size");
-                }
-                return new EndRecord(payload.getLong());
-            }
-            throw new IOException("Unknown replay record type: " + type);
+            return switch (type) {
+                case RepWriter.TICK_RECORD -> readTick();
+                case RepWriter.ACTION_RECORD -> readActions(false);
+                case RepWriter.SINGLE_ACTION_RECORD -> readActions(true);
+                case RepWriter.RANDOM_RECORD -> readRandomRecord();
+                case RepWriter.END_RECORD -> new EndRecord(advanceTick(readVarLong()));
+                default -> throw new IOException("Unknown replay record type: " + type);
+            };
         } catch (RuntimeException e) {
             throw new IOException("Malformed replay record", e);
         }
     }
 
-    /** Decodes one player-state record. */
-    private TickRecord readTick(ByteBuffer payload) throws IOException {
-        int expectedSize = Long.BYTES + 7 * Float.BYTES + 2 + 4;
-        if (payload.remaining() != expectedSize) {
-            throw new IOException("Invalid tick record size: " + payload.remaining());
+    private TickRecord readTick() throws IOException {
+        long tick = advanceTick(readVarLong());
+        TickControls controls = TickControls.decode(readFixed(Integer.BYTES).getInt());
+        long aimDeltaX = readSignedVarLong();
+        long aimDeltaY = readSignedVarLong();
+        long decodedAimX = (long)lastAimX + aimDeltaX;
+        long decodedAimY = (long)lastAimY + aimDeltaY;
+        if (decodedAimX < Integer.MIN_VALUE || decodedAimX > Integer.MAX_VALUE ||
+            decodedAimY < Integer.MIN_VALUE || decodedAimY > Integer.MAX_VALUE) {
+            throw new IOException("Replay aim coordinate is outside the supported range");
         }
+        lastAimX = (int)decodedAimX;
+        lastAimY = (int)decodedAimY;
 
-        long tick = payload.getLong();
-        float movementX = payload.getFloat();
-        float movementY = payload.getFloat();
-        float aimX = payload.getFloat();
-        float aimY = payload.getFloat();
-        float cameraX = payload.getFloat();
-        float cameraY = payload.getFloat();
-        float cameraScale = payload.getFloat();
-        if (!Float.isFinite(movementX) || !Float.isFinite(movementY) ||
-            !Float.isFinite(aimX) || !Float.isFinite(aimY) ||
-            !Float.isFinite(cameraX) || !Float.isFinite(cameraY) ||
-            !Float.isFinite(cameraScale) || cameraScale <= 0f) {
-            throw new IOException("Invalid non-finite replay control value");
-        }
-        byte shooting = payload.get();
-        byte boosting = payload.get();
-        if ((shooting != 0 && shooting != 1) || (boosting != 0 && boosting != 1)) {
-            throw new IOException("Invalid replay control flags");
-        }
-        short mineX = payload.getShort();
-        short mineY = payload.getShort();
+        ByteBuffer mining = readFixed(Short.BYTES * 2);
+        short mineX = mining.getShort();
+        short mineY = mining.getShort();
         if ((mineX == -1) != (mineY == -1) || mineX < -1 || mineY < -1) {
             throw new IOException("Invalid replay mining tile");
         }
-        return new TickRecord(tick, movementX, movementY, aimX, aimY,
-            shooting == 1, boosting == 1, mineX, mineY,
-            cameraX, cameraY, cameraScale);
+        return new TickRecord(tick,
+            controls.movementX(),
+            controls.movementY(),
+            lastAimX / 8f,
+            lastAimY / 8f,
+            controls.shooting(), controls.boosting(), mineX, mineY);
     }
 
-    /** Decodes one action record and its serialized actions. */
-    private ActionRecord readActions(ByteBuffer payload) throws IOException {
-        if (payload.remaining() < Long.BYTES + Short.BYTES) {
-            throw new IOException("Truncated action record");
+    private ActionRecord readActions(boolean single) throws IOException {
+        int payloadSize = readVarInt();
+        if (payloadSize < 2 || payloadSize > MAX_RECORD_SIZE) {
+            throw new IOException("Invalid action record size: " + payloadSize);
         }
-        long tick = payload.getLong();
-        short count = payload.getShort();
-        if (count < 0) {
+        ByteBuffer payload = readFixed(payloadSize);
+        long tick = advanceTick(VarLong.read(payload));
+        int count = single ? 1 : VarInt.read(payload);
+        if ((single && count != 1) ||
+            (!single && (count < 2 || count > Short.MAX_VALUE))) {
             throw new IOException("Invalid action count: " + count);
         }
         List<Action> actions = new ArrayList<>(count);
@@ -437,17 +420,15 @@ public class RepReader implements Closeable {
         return new ActionRecord(tick, List.copyOf(actions));
     }
 
-    /** Reads a per-update random generator checkpoint. */
-    private RandomRecord readRandomRecord(ByteBuffer payload) throws IOException {
-        return decodeRandomRecord(payload);
+    private RandomRecord readRandomRecord() throws IOException {
+        long tick = advanceTick(readVarLong());
+        return decodeRandomRecord(tick, readFixed(Long.BYTES * 2));
     }
 
-    /** Decodes a per-update random generator checkpoint. */
-    static RandomRecord decodeRandomRecord(ByteBuffer payload) throws IOException {
-        if (payload.remaining() != Long.BYTES * 3) {
+    static RandomRecord decodeRandomRecord(long tick, ByteBuffer payload) throws IOException {
+        if (payload.remaining() != Long.BYTES * 2) {
             throw new IOException("Invalid replay random state record");
         }
-        long tick = payload.getLong();
         long seed0 = payload.getLong();
         long seed1 = payload.getLong();
         if ((seed0 | seed1) == 0L) {
@@ -456,7 +437,68 @@ public class RepReader implements Closeable {
         return new RandomRecord(tick, seed0, seed1);
     }
 
-    /** Reads the requested bytes, optionally accepting a clean end of file. */
+    private ByteBuffer readFixed(int size) throws IOException {
+        ByteBuffer result = ByteBuffer.allocate(size).order(ByteOrder.LITTLE_ENDIAN);
+        readFully(result, false);
+        result.flip();
+        return result;
+    }
+
+    private long readVarLong() throws IOException {
+        long result = 0L;
+        for (int index = 0; index < 10; index++) {
+            int next = readUnsignedByte();
+            if (index == 9 && (next & 0xFE) != 0) {
+                throw new IOException("VarLong overflow");
+            }
+            result |= (long)(next & 0x7F) << (index * 7);
+            if ((next & 0x80) == 0) {
+                if (index > 0 && (next & 0x7F) == 0) {
+                    throw new IOException("Non-canonical VarLong");
+                }
+                return result;
+            }
+        }
+        throw new IOException("VarLong too long");
+    }
+
+    private long readSignedVarLong() throws IOException {
+        long value = readVarLong();
+        return (value >>> 1) ^ -(value & 1L);
+    }
+
+    private int readVarInt() throws IOException {
+        int result = 0;
+        for (int index = 0; index < 5; index++) {
+            int next = readUnsignedByte();
+            if (index == 4 && (next & 0xF0) != 0) {
+                throw new IOException("VarInt overflow");
+            }
+            result |= (next & 0x7F) << (index * 7);
+            if ((next & 0x80) == 0) {
+                if (index > 0 && (next & 0x7F) == 0) {
+                    throw new IOException("Non-canonical VarInt");
+                }
+                return result;
+            }
+        }
+        throw new IOException("VarInt too long");
+    }
+
+    private int readUnsignedByte() throws IOException {
+        singleByte.clear();
+        readFully(singleByte, false);
+        return singleByte.get(0) & 0xFF;
+    }
+
+    private long advanceTick(long delta) throws IOException {
+        if (delta < 0L || lastRecordTick > Long.MAX_VALUE - delta) {
+            throw new IOException("Invalid replay tick delta");
+        }
+        lastRecordTick += delta;
+        return lastRecordTick;
+    }
+
     private boolean readFully(ByteBuffer buffer, boolean allowCleanEof) throws IOException {
         boolean readAny = false;
         while (buffer.hasRemaining()) {
@@ -467,7 +509,7 @@ public class RepReader implements Closeable {
                     if (allowCleanEof && !readAny) return false;
                     throw new IOException("Unexpected end of replay file");
                 }
-                if (count == 0) continue;
+                if (count == 0) throw new IOException("Could not make progress reading replay data");
                 inputBuffer.flip();
             }
 
@@ -482,7 +524,6 @@ public class RepReader implements Closeable {
     }
 
     @Override
-    /** Closes the replay file channel. */
     public void close() throws IOException {
         channel.close();
     }
@@ -492,8 +533,7 @@ public class RepReader implements Closeable {
     }
 
     public record TickRecord(long tick, float movementX, float movementY, float aimX, float aimY,
-                             boolean shooting, boolean boosting, short mineX, short mineY,
-                             float cameraX, float cameraY, float cameraScale)
+                             boolean shooting, boolean boosting, short mineX, short mineY)
         implements ReplayRecord {}
 
     record RandomState(long seed0, long seed1) {}
@@ -504,3 +544,5 @@ public class RepReader implements Closeable {
 
     public record EndRecord(long tick) implements ReplayRecord {}
 }
+
+

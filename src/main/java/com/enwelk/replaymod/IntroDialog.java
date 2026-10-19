@@ -28,3 +28,5 @@ public class IntroDialog extends BaseDialog {
         return Core.settings.getBool(DISMISSED_SETTING, false);
     }
 }
+
+

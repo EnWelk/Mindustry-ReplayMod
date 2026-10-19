@@ -1,4 +1,4 @@
-package com.enwelk.replaymod;
+package com.enwelk.replaymod.input;
 
 import java.io.ByteArrayOutputStream;
 import java.io.DataOutputStream;
@@ -7,6 +7,9 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 
+import com.enwelk.replaymod.Action;
+import com.enwelk.replaymod.rep.RepWriter;
+
 import arc.Events;
 import arc.func.Cons;
 import arc.math.geom.Vec2;
@@ -14,6 +17,7 @@ import arc.util.Log;
 import arc.util.io.Writes;
 import arc.util.serialization.Jval;
 import mindustry.Vars;
+import mindustry.entities.units.BuildPlan;
 import mindustry.game.EventType.BuildRotateEvent;
 import mindustry.game.EventType.BuildSelectEvent;
 import mindustry.game.EventType.ConfigEvent;
@@ -21,29 +25,39 @@ import mindustry.game.EventType.PayloadDropEvent;
 import mindustry.game.EventType.PickupEvent;
 import mindustry.game.EventType.TapEvent;
 import mindustry.game.EventType.UnitControlEvent;
-import mindustry.entities.units.BuildPlan;
-import mindustry.gen.Building;
-import mindustry.gen.Teamc;
-import mindustry.input.DesktopInput;
 import mindustry.input.PlaceMode;
 import mindustry.io.TypeIO;
 import mindustry.type.Item;
 import mindustry.world.Tile;
 
-import com.enwelk.replaymod.rep.RepWriter;
-
-public class ReplayRecordInput extends DesktopInput implements AutoCloseable {
+public class RecordInput implements AutoCloseable {
     private final RepWriter writer;
     private final Vec2 lastMovement = new Vec2();
+    private final Vec2 normalizedMovement = new Vec2();
     private final List<Action> pendingActions = new ArrayList<>();
+    private static final float TELEPORT_RECORD_DISTANCE = 8f;
+
+    private float lastUnitX = Float.NaN;
+    private float lastUnitY = Float.NaN;
     private float lastAimX, lastAimY;
-    private float lastCameraX, lastCameraY, lastCameraScale;
     private boolean lastShooting, lastBoosting, lastBuilding;
     private boolean hasRecordedInput;
     private long lastInputTick = Long.MIN_VALUE;
     private long pendingActionTick = Long.MIN_VALUE;
     private Tile lastMineTile;
     private PlaceMode lastMode = PlaceMode.none;
+
+    private boolean hasPendingSample;
+    private float pendingMoveX, pendingMoveY, pendingAimX, pendingAimY;
+    private boolean pendingShooting, pendingBoosting;
+    private Tile pendingMineTile;
+    private double pendingFromTick;
+
+    private long accTick = Long.MIN_VALUE;
+    private double accWeight;
+    private double accMoveX, accMoveY, accAimX, accAimY;
+    private double accShootWeight, accBoostWeight;
+    private Tile accMineTile;
 
     private final Cons<BuildSelectEvent> buildListener = this::recordBuild;
     private final Cons<ConfigEvent> configListener = this::recordConfig;
@@ -53,147 +67,226 @@ public class ReplayRecordInput extends DesktopInput implements AutoCloseable {
     private final Cons<PickupEvent> pickupListener = this::recordPickup;
     private final Cons<PayloadDropEvent> dropListener = this::recordDrop;
 
-    /** Creates an input handler that records gameplay events to a replay. */
-    public ReplayRecordInput(RepWriter writer) {
+    public RecordInput(RepWriter writer) {
         this.writer = writer;
         registerEventListeners();
     }
 
-    @Override
-    /** Records movement after the base handler updates the controlled unit. */
-    protected void updateMovement(mindustry.gen.Unit unit) {
-        super.updateMovement(unit);
-        recordMovementIfChanged(unit);
-    }
-
-    @Override
-    /** Records per-tick input and flushes queued gameplay actions. */
-    public void update() {
-        long tick = (long)Math.floor(Vars.state.tick);
+    public void preUpdate() {
+        double now = Vars.state.tick;
+        long tick = (long)Math.floor(now);
         if (!pendingActions.isEmpty() && pendingActionTick < tick) {
             flushActions();
         }
+        closePendingSample(now);
+        while (accTick != Long.MIN_VALUE && accTick < tick) {
+            finalizeTick();
+        }
+    }
 
-        super.update();
-
-        if (mode != null && mode != lastMode) {
+    public void postUpdate(PlaceMode currentMode, boolean currentIsBuilding) {
+        if (currentMode != null && currentMode != lastMode) {
             Action.ModeChange action = new Action.ModeChange();
-            action.mode = (byte)mode.ordinal();
+            action.mode = (byte)currentMode.ordinal();
             record(action);
-            lastMode = mode;
+            lastMode = currentMode;
         }
 
-        if (isBuilding != lastBuilding) {
+        if (currentIsBuilding != lastBuilding) {
             Action.BuildPause action = new Action.BuildPause();
-            action.isBuilding = (byte)(isBuilding ? 1 : 0);
+            action.isBuilding = (byte)(currentIsBuilding ? 1 : 0);
             record(action);
-            lastBuilding = isBuilding;
+            lastBuilding = currentIsBuilding;
         }
 
         flushActions();
     }
 
-    @Override
-    /** Records unit commands issued through the command interface. */
-    public void commandTap(float screenX, float screenY, boolean queue) {
-        if (!commandMode || selectedUnits.isEmpty() || Vars.player == null) {
-            super.commandTap(screenX, screenY, queue);
-            return;
-        }
+    public void recordMovementIfChanged(mindustry.gen.Unit unit, Vec2 currentVelocity,
+                                    float currentAimX, float currentAimY,
+                                    boolean currentShooting, boolean currentBoosting,
+                                    Tile currentMineTile) {
+        float unitX = unit.x;
+        float unitY = unit.y;
+        if (Float.isFinite(unitX) && Float.isFinite(unitY)) {
+            if (Float.isFinite(lastUnitX) && Float.isFinite(lastUnitY)) {
+                float dx = unitX - lastUnitX;
+                float dy = unitY - lastUnitY;
 
-        Vec2 targetPosition = arc.Core.input.mouseWorld(screenX, screenY).cpy();
-        Teamc target = Vars.world.buildWorld(targetPosition.x, targetPosition.y);
-        if (target == null || target.team() == Vars.player.team()) {
-            target = selectedEnemyUnit(targetPosition.x, targetPosition.y);
+                if (dx * dx + dy * dy > TELEPORT_RECORD_DISTANCE * TELEPORT_RECORD_DISTANCE) {
+                    Action.Teleport teleport = new Action.Teleport();
+                    teleport.x = unitX;
+                    teleport.y = unitY;
+                    record(teleport);
+                }
+            }
+            lastUnitX = unitX;
+            lastUnitY = unitY;
         }
+        var player = Vars.player;
+        if (unit == null || writer == null || player == null || Vars.state == null) return;
+        float movementX = currentVelocity == null ? 0f : currentVelocity.x;
+        float movementY = currentVelocity == null ? 0f : currentVelocity.y;
+        normalizeRecordedMovement(normalizedMovement, movementX, movementY, unit.speed());
+        float aimX = Float.isFinite(currentAimX) ? currentAimX : lastAimX;
+        float aimY = Float.isFinite(currentAimY) ? currentAimY : lastAimY;
 
-        Action.Command action = new Action.Command();
-        action.posX = targetPosition.x;
-        action.posY = targetPosition.y;
-        action.unitIds = new int[selectedUnits.size];
-        for (int i = 0; i < selectedUnits.size; i++) {
-            action.unitIds[i] = selectedUnits.get(i).id();
-        }
-        if (target instanceof mindustry.gen.Unit unit) {
-            action.cmdType = (byte)(1 | (queue ? 4 : 0));
-            action.targetId = unit.id();
-        } else if (target instanceof Building building) {
-            action.cmdType = (byte)(2 | (queue ? 4 : 0));
-            action.targetId = building.tile.pos();
-        } else {
-            action.cmdType = (byte)(queue ? 4 : 0);
-            action.targetId = -1;
-        }
+        double now = Vars.state.tick;
+        closePendingSample(now);
 
-        super.commandTap(screenX, screenY, queue);
-        record(action);
+        hasPendingSample = true;
+        pendingMoveX = normalizedMovement.x;
+        pendingMoveY = normalizedMovement.y;
+        pendingAimX = aimX;
+        pendingAimY = aimY;
+        pendingShooting = currentShooting;
+        pendingBoosting = currentBoosting;
+        pendingMineTile = currentMineTile;
+        pendingFromTick = now;
     }
 
-    /** Writes a new tick packet when tracked player state has changed. */
-    private void recordMovementIfChanged(mindustry.gen.Unit unit) {
-        var player = Vars.player;
-        if (unit == null || writer == null || player == null) {
-            return;
+    private void closePendingSample(double now) {
+        if (!hasPendingSample) return;
+        double boundary = Math.floor(pendingFromTick) + 1.0;
+        double weight = Math.min(Math.max(0.0, now - pendingFromTick), boundary - pendingFromTick);
+        hasPendingSample = false;
+        accumulateSample((long)Math.floor(pendingFromTick), weight,
+            pendingMoveX, pendingMoveY, pendingAimX, pendingAimY,
+            pendingShooting, pendingBoosting, pendingMineTile);
+    }
+
+    private void accumulateSample(long sampleTick, double weight, float movementX, float movementY,
+                                  float aimX, float aimY, boolean shooting, boolean boosting, Tile mineTile) {
+        if (accTick != Long.MIN_VALUE && sampleTick != accTick) {
+            finalizeTick();
         }
+        if (accTick == Long.MIN_VALUE) {
+            accTick = sampleTick;
+        }
+        if (weight <= 0.0) return;
+        accWeight += weight;
+        accMoveX += movementX * weight;
+        accMoveY += movementY * weight;
+        accAimX += aimX * weight;
+        accAimY += aimY * weight;
+        if (shooting) accShootWeight += weight;
+        if (boosting) accBoostWeight += weight;
+        accMineTile = mineTile;
+    }
 
-        Tile mineTile = unit.mineTile;
-        float cameraX = arc.Core.camera.position.x;
-        float cameraY = arc.Core.camera.position.y;
-        float cameraScale = Vars.renderer.getScale();
-        long tick = (long)Math.floor(Vars.state.tick);
-        if (tick != lastInputTick && (shouldRecordContinuousInput(tick, lastInputTick,
-            player.shooting, player.boosting) || !hasRecordedInput ||
-            !movement.epsilonEquals(lastMovement, 0.001f) ||
-            Math.abs(unit.aimX() - lastAimX) > 0.1f ||
-            Math.abs(unit.aimY() - lastAimY) > 0.1f ||
-            Math.abs(cameraX - lastCameraX) > 0.1f ||
-            Math.abs(cameraY - lastCameraY) > 0.1f ||
-            Math.abs(cameraScale - lastCameraScale) > 0.001f ||
-            player.shooting != lastShooting ||
-            player.boosting != lastBoosting ||
-            mineTile != lastMineTile)) {
+    void flushRecordedInput(double now) {
+        closePendingSample(now);
+        hasPendingSample = false;
+        finalizeTick();
+    }
 
+    public void flushCompletedTicks(double now) {
+        if (hasPendingSample) {
+            double boundary = Math.floor(pendingFromTick) + 1.0;
+            if (now >= boundary) {
+                accumulateSample((long)Math.floor(pendingFromTick), boundary - pendingFromTick,
+                    pendingMoveX, pendingMoveY, pendingAimX, pendingAimY,
+                    pendingShooting, pendingBoosting, pendingMineTile);
+                pendingFromTick = boundary;
+            }
+        }
+        while (accTick != Long.MIN_VALUE && accTick < (long)Math.floor(now)) {
+            finalizeTick();
+        }
+    }
+
+    private void finalizeTick() {
+        if (accTick == Long.MIN_VALUE) return;
+        long tick = accTick;
+        double weight = accWeight;
+        float movementX = 0f, movementY = 0f;
+        float aimX = lastAimX, aimY = lastAimY;
+        boolean shooting = false, boosting = false;
+        Tile mineTile = accMineTile;
+        if (weight > 0.0) {
+            movementX = (float)(accMoveX / weight);
+            movementY = (float)(accMoveY / weight);
+            aimX = (float)(accAimX / weight);
+            aimY = (float)(accAimY / weight);
+            shooting = accShootWeight * 2.0 >= weight;
+            boosting = accBoostWeight * 2.0 >= weight;
+            float length = (float)Math.sqrt(movementX * movementX + movementY * movementY);
+            if (length > 1f) {
+                movementX /= length;
+                movementY /= length;
+            }
+        }
+        accTick = Long.MIN_VALUE;
+        accWeight = 0.0;
+        accMoveX = 0.0;
+        accMoveY = 0.0;
+        accAimX = 0.0;
+        accAimY = 0.0;
+        accShootWeight = 0.0;
+        accBoostWeight = 0.0;
+        accMineTile = null;
+
+        if (weight <= 0.0) return;
+
+        if (shouldRecordContinuousInput(tick, lastInputTick, shooting, boosting)
+                || !hasRecordedInput
+                || Math.abs(movementX - lastMovement.x) > 0.01f
+                || Math.abs(movementY - lastMovement.y) > 0.01f
+                || Math.abs(aimX - lastAimX) > 0.1f
+                || Math.abs(aimY - lastAimY) > 0.1f
+                || shooting != lastShooting
+                || boosting != lastBoosting
+                || mineTile != lastMineTile) {
             try {
                 writer.writeTickPacket(
                     tick,
-                    movement.x, movement.y,
-                    unit.aimX(), unit.aimY(),
-                    player.shooting,
-                    player.boosting,
-                    mineTile,
-                    cameraX, cameraY, cameraScale
+                    movementX,
+                    movementY,
+                    aimX,
+                    aimY,
+                    shooting,
+                    boosting,
+                    mineTile
                 );
             } catch (IOException e) {
                 Log.err("Failed to write tick packet to replay", e);
             }
-
-            lastMovement.set(movement);
-            lastAimX = unit.aimX();
-            lastAimY = unit.aimY();
-            lastCameraX = cameraX;
-            lastCameraY = cameraY;
-            lastCameraScale = cameraScale;
-            lastShooting = player.shooting;
-            lastBoosting = player.boosting;
+            lastMovement.set(movementX, movementY);
+            lastAimX = aimX;
+            lastAimY = aimY;
+            lastShooting = shooting;
+            lastBoosting = boosting;
             lastMineTile = mineTile;
             hasRecordedInput = true;
             lastInputTick = tick;
         }
     }
 
-    /** Keeps held fire and boost state present in every replay tick. */
-    static boolean shouldRecordContinuousInput(long tick, long lastInputTick,
-                                               boolean shooting, boolean boosting) {
+    static boolean shouldRecordContinuousInput(long tick, long lastInputTick, boolean shooting, boolean boosting) {
         return tick != lastInputTick && (shooting || boosting);
     }
 
-    /** Registers listeners for gameplay events that need replay records. */
+    static Vec2 normalizeRecordedMovement(Vec2 out, float movementX, float movementY, float unitSpeed) {
+        if (!Float.isFinite(movementX) || !Float.isFinite(movementY) ||
+            !Float.isFinite(unitSpeed) || unitSpeed <= 0.00001f) {
+            return out.setZero();
+        }
+        float x = movementX / unitSpeed;
+        float y = movementY / unitSpeed;
+        float length = (float)Math.sqrt(x * x + y * y);
+        if (length > 1f) {
+            x /= length;
+            y /= length;
+        }
+        return out.set(x, y);
+    }
+
     private void registerEventListeners() {
         Events.on(BuildSelectEvent.class, buildListener);
         Events.on(ConfigEvent.class, configListener);
         Events.on(UnitControlEvent.class, controlListener);
         Events.on(BuildRotateEvent.class, rotateListener);
-        Events.on(TapEvent.class, tapListener);
+        Events.on(TapEvent.class, tapListener); 
         Events.on(PickupEvent.class, pickupListener);
         Events.on(PayloadDropEvent.class, dropListener);
     }
@@ -369,8 +462,7 @@ public class ReplayRecordInput extends DesktopInput implements AutoCloseable {
         }
     }
 
-    /** Queues an action with the current simulation tick. */
-    private void record(Action action) {
+    public void record(Action action) {
         long tick = (long)Math.floor(Vars.state.tick);
         if (!pendingActions.isEmpty() && tick != pendingActionTick) {
             flushActions();
@@ -381,7 +473,6 @@ public class ReplayRecordInput extends DesktopInput implements AutoCloseable {
         pendingActions.add(action);
     }
 
-    /** Writes queued actions when their associated tick is complete. */
     private void flushActions() {
         if (pendingActions.isEmpty()) return;
         try {
@@ -394,15 +485,16 @@ public class ReplayRecordInput extends DesktopInput implements AutoCloseable {
         }
     }
 
-    /** Returns whether the unit is controlled by the local player. */
     private boolean isLocalUnit(mindustry.gen.Unit unit) {
         var player = Vars.player;
         return player != null && player.unit() == unit;
     }
 
-    /** Unregisters event listeners and closes the underlying writer. */
     @Override
     public void close() {
+        if (writer != null && Vars.state != null) {
+            flushRecordedInput(Vars.state.tick);
+        }
         flushActions();
         Events.remove(BuildSelectEvent.class, buildListener);
         Events.remove(ConfigEvent.class, configListener);
@@ -413,3 +505,5 @@ public class ReplayRecordInput extends DesktopInput implements AutoCloseable {
         Events.remove(PayloadDropEvent.class, dropListener);
     }
 }
+
+

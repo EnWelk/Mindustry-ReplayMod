@@ -7,6 +7,8 @@ import java.util.List;
 
 import org.junit.jupiter.api.Test;
 
+import com.enwelk.replaymod.util.VarInt;
+
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
@@ -81,23 +83,30 @@ class ActionTests {
         assertThrows(IllegalArgumentException.class,
             () -> Action.read(ByteBuffer.wrap(new byte[]{99})));
 
-        ByteBuffer invalidConfig = ByteBuffer.allocate(6).order(ByteOrder.LITTLE_ENDIAN);
-        invalidConfig.put((byte)3).putInt(1).put((byte)99).flip();
+        ByteBuffer invalidConfig = ByteBuffer.allocate(3).order(ByteOrder.LITTLE_ENDIAN);
+        invalidConfig.put((byte)3);
+        VarInt.writeSigned(invalidConfig, 1);
+        invalidConfig.put((byte)99).flip();
         assertThrows(IllegalArgumentException.class, () -> Action.read(invalidConfig));
     }
 
     /** Checks that invalid command and config lengths are rejected. */
     @Test
     void malformedCommandAndConfigLengthsAreRejected() {
-        ByteBuffer invalidCommand = ByteBuffer.allocate(1 + 1 + 4 + 4 + 4 + 2)
-            .order(ByteOrder.LITTLE_ENDIAN);
-        invalidCommand.put((byte)7).put((byte)0).putInt(1).putFloat(0).putFloat(0)
-            .putShort((short)-1).flip();
+        ByteBuffer invalidCommand = ByteBuffer.allocate(32).order(ByteOrder.LITTLE_ENDIAN);
+        invalidCommand.put((byte)7).put((byte)0);
+        VarInt.writeSigned(invalidCommand, 1);
+        invalidCommand.putFloat(0).putFloat(0);
+        VarInt.write(invalidCommand, -1);
+        invalidCommand.flip();
         assertThrows(IllegalArgumentException.class, () -> Action.read(invalidCommand));
 
-        ByteBuffer invalidConfig = ByteBuffer.allocate(1 + 4 + 1 + 4)
-            .order(ByteOrder.LITTLE_ENDIAN);
-        invalidConfig.put((byte)3).putInt(1).put((byte)4).putInt(8).flip();
+        ByteBuffer invalidConfig = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN);
+        invalidConfig.put((byte)3);
+        VarInt.writeSigned(invalidConfig, 1);
+        invalidConfig.put((byte)4);
+        VarInt.write(invalidConfig, 8);
+        invalidConfig.flip();
         assertThrows(IllegalArgumentException.class, () -> Action.read(invalidConfig));
     }
 
@@ -150,3 +159,5 @@ class ActionTests {
         return result;
     }
 }
+
+
