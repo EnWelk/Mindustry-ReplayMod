@@ -53,5 +53,3 @@ public final class VarLong {
         return size;
     }
 }
-
-

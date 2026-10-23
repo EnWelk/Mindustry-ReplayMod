@@ -2,7 +2,7 @@ name: ReplayMod
 displayName: ReplayMod
 author: EnWelk
 description: Record and replay your gameplay sessions in Mindustry. Telegram: @EnWelk. I didn't test it in multiplayer and with random unit logic. If you notice an error in the translation, please write to me. Movement playback on PC may have some inaccuracies. I'd appreciate it if you could let me know which unit missed its target and by approximately how much (e.g., one tile, half a tile, etc.).
-version: 0.4.0
+version: 0.4.1
 minGameVersion: 154
 java: true
 main: com.enwelk.replaymod.ReplayMod

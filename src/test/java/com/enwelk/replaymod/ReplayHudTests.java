@@ -57,5 +57,3 @@ class ReplayHudTests {
         assertFalse(ReplayHud.waveSkipDisabled(controller, () -> false).get());
     }
 }
-
-

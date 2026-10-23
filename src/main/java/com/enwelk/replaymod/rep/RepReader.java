@@ -44,6 +44,10 @@ public class RepReader implements Closeable {
     private long lastRecordTick;
     private int lastAimX;
     private int lastAimY;
+    private long lastReadPosition;
+    private long lastReadTick;
+    private int lastReadAimX;
+    private int lastReadAimY;
 
     public RepReader(Path filePath) throws IOException {
         this.filePath = filePath;
@@ -193,6 +197,35 @@ public class RepReader implements Closeable {
         lastRecordTick = 0L;
         lastAimX = 0;
         lastAimY = 0;
+        lastReadPosition = recordsStart;
+        lastReadTick = 0L;
+        lastReadAimX = 0;
+        lastReadAimY = 0;
+    }
+
+    /**
+     * Captures the decoder state immediately before the record returned by the last {@link #readNext()} call.
+     * Restoring a cursor lets playback resume at exactly the same pending record.
+     */
+    public Cursor cursor() {
+        return new Cursor(lastReadPosition, lastReadTick, lastReadAimX, lastReadAimY);
+    }
+
+    /** Repositions the reader so the next {@link #readNext()} returns the record after the cursor. */
+    public void resetTo(Cursor cursor) throws IOException {
+        if (cursor.position() < recordsStart || cursor.position() > channel.size()) {
+            throw new IOException("Invalid replay cursor position");
+        }
+        channel.position(cursor.position());
+        inputBuffer.position(0);
+        inputBuffer.limit(0);
+        lastRecordTick = cursor.lastRecordTick();
+        lastAimX = cursor.lastAimX();
+        lastAimY = cursor.lastAimY();
+        lastReadPosition = cursor.position();
+        lastReadTick = cursor.lastRecordTick();
+        lastReadAimX = cursor.lastAimX();
+        lastReadAimY = cursor.lastAimY();
     }
 
     private float readHeader() throws IOException {
@@ -353,6 +386,10 @@ public class RepReader implements Closeable {
     }
 
     public ReplayRecord readNext() throws IOException {
+        lastReadPosition = channel.position() - inputBuffer.remaining();
+        lastReadTick = lastRecordTick;
+        lastReadAimX = lastAimX;
+        lastReadAimY = lastAimY;
         singleByte.clear();
         if (!readFully(singleByte, true)) return null;
         byte type = singleByte.get(0);
@@ -543,6 +580,7 @@ public class RepReader implements Closeable {
     public record RandomRecord(long tick, long seed0, long seed1) implements ReplayRecord {}
 
     public record EndRecord(long tick) implements ReplayRecord {}
+
+    /** Decoder state captured before a pending record, used by in-memory playback snapshots. */
+    public record Cursor(long position, long lastRecordTick, int lastAimX, int lastAimY) {}
 }
-
-

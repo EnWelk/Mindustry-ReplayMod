@@ -314,5 +314,3 @@ public class ReplayHud {
         dialog.show();
     }
 }
-
-

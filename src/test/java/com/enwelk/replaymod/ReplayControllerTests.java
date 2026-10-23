@@ -386,6 +386,80 @@ class ReplayControllerTests {
         assertFalse(stopped[0]);
     }
 
+    /** Checks that a world reset ends playback without the manual-stop callback. */
+    @Test
+    void worldResetStopsActivePlayback() throws Exception {
+        ReplayController controller = activeController(15L, 100L);
+        Graphics previousGraphics = Core.graphics;
+        Graphics graphics = mock(Graphics.class);
+        when(graphics.getDeltaTime()).thenReturn(1f / 60f);
+        Core.graphics = graphics;
+        boolean[] stopped = {false};
+        boolean[] finished = {false};
+        controller.setPlaybackStoppedListener(() -> stopped[0] = true);
+        controller.setPlaybackFinishedListener(() -> finished[0] = true);
+
+        try {
+            controller.stopPlaybackForWorldReset();
+        } finally {
+            Core.graphics = previousGraphics;
+            Time.setDeltaProvider(() -> 1f);
+        }
+
+        assertFalse(controller.isPlaying());
+        assertFalse(controller.isActive());
+        assertFalse(controller.isSeeking());
+        assertFalse(stopped[0]);
+        assertFalse(finished[0]);
+    }
+
+    /** Checks that a world reset while idle is harmless. */
+    @Test
+    void worldResetDoesNothingWhenPlaybackIsIdle() {
+        ReplayController controller = new ReplayController();
+
+        org.junit.jupiter.api.Assertions.assertDoesNotThrow(controller::stopPlaybackForWorldReset);
+
+        assertFalse(controller.isPlaying());
+    }
+
+    /** Checks that playback survives the world resets it triggers itself. */
+    @Test
+    void worldResetDuringSelfLoadKeepsPlayback() throws Exception {
+        ReplayController controller = activeController(15L, 100L);
+        setField(controller, "loadingReplayWorld", true);
+
+        try {
+            controller.stopPlaybackForWorldReset();
+        } finally {
+            setField(controller, "loadingReplayWorld", false);
+        }
+
+        assertTrue(controller.isPlaying());
+    }
+
+    /** Checks that a failed stop during a world reset does not propagate into the game. */
+    @Test
+    void worldResetSwallowsStopFailures() throws Exception {
+        ReplayController controller = activeController(15L, 100L);
+        RepReader reader = mock(RepReader.class);
+        org.mockito.Mockito.doThrow(new java.io.IOException("close failed")).when(reader).close();
+        setField(controller, "reader", reader);
+        Graphics previousGraphics = Core.graphics;
+        Graphics graphics = mock(Graphics.class);
+        when(graphics.getDeltaTime()).thenReturn(1f / 60f);
+        Core.graphics = graphics;
+
+        try {
+            org.junit.jupiter.api.Assertions.assertDoesNotThrow(controller::stopPlaybackForWorldReset);
+        } finally {
+            Core.graphics = previousGraphics;
+            Time.setDeltaProvider(() -> 1f);
+        }
+
+        assertFalse(controller.isPlaying());
+    }
+
     @Test
     void playbackFailureShowsErrorCallbackAndRestoresSkipWaveBinding() throws Exception {
         ReplayController controller = activeController(0L, 100L);
@@ -682,5 +756,3 @@ class ReplayControllerTests {
         field.set(target, value);
     }
 }
-
-

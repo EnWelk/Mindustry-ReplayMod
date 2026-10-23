@@ -32,5 +32,3 @@ record TickControls(float movementX, float movementY, boolean shooting, boolean 
         return (value & 0x4000) == 0 ? value : value - 0x8000;
     }
 }
-
-

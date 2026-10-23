@@ -156,5 +156,3 @@ class ViewerTests {
         verify(Vars.renderer, never()).setScale(org.mockito.ArgumentMatchers.anyFloat());
     }
 }
-
-

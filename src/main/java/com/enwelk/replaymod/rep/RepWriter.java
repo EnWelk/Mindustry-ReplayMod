@@ -210,12 +210,15 @@ public class RepWriter implements Closeable {
     /** Writes the terminal record once to mark the replay's last tick. */
     public void finish(long tick) throws IOException {
         if (finished) return;
-        long deltaTick = tickDelta(tick);
+        // A game reset can move the live tick backwards before we get a chance to finish.
+        // Never emit a decreasing END record; clamping keeps the replay loadable.
+        long endTick = Math.max(tick, lastRecordTick);
+        long deltaTick = tickDelta(endTick);
         ByteBuffer payload = ByteBuffer.allocate(VarLong.size(deltaTick)).order(ByteOrder.LITTLE_ENDIAN);
         VarLong.write(payload, deltaTick);
         payload.flip();
         writeRecord(END_RECORD, payload, false);
-        lastRecordTick = tick;
+        lastRecordTick = endTick;
         finished = true;
     }
 
@@ -279,5 +282,3 @@ public class RepWriter implements Closeable {
         }
     }
 }
-
-

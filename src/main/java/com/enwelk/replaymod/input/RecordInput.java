@@ -505,5 +505,3 @@ public class RecordInput implements AutoCloseable {
         Events.remove(PayloadDropEvent.class, dropListener);
     }
 }
-
-

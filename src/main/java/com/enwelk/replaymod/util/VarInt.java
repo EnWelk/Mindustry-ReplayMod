@@ -53,5 +53,3 @@ public final class VarInt {
         return size;
     }
 }
-
-

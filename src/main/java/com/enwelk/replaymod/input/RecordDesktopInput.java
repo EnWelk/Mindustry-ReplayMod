@@ -83,5 +83,3 @@ public class RecordDesktopInput extends DesktopInput implements AutoCloseable {
         recorder.close();
     }
 }
-
-

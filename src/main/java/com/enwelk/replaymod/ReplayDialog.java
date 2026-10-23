@@ -585,5 +585,3 @@ public class ReplayDialog extends BaseDialog {
         return text.substring(0, Math.max(0, maxLength - 3)) + "...";
     }
 }
-
-

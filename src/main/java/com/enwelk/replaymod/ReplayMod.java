@@ -13,6 +13,7 @@ import arc.util.serialization.Jval;
 import mindustry.Vars;
 import mindustry.game.EventType.DisposeEvent;
 import mindustry.game.EventType.PlayEvent;
+import mindustry.game.EventType.ResetEvent;
 import mindustry.game.EventType.Trigger;
 import mindustry.mod.Mod;
 import mindustry.mod.Mods.LoadedMod;
@@ -44,6 +45,23 @@ public class ReplayMod extends Mod {
                 Log.err("Failed to stop replay before starting a new game", e);
             }
             showIntro();
+        });
+        // ResetEvent is fired by Logic.reset() before the tick counter is reset, so the
+        // recording can still be finished with a valid, non-decreasing end tick.
+        // ResetEvent also fires for every world change that never reaches a PlayEvent
+        // (exit to menu, map editor, continuing a campaign sector, joining a server), so an
+        // active playback has to be released here as well; otherwise the new world inherits
+        // the replay input handler and time scale and the game appears frozen after the switch.
+        Events.on(ResetEvent.class, event -> {
+            if (controller.isRecording()) {
+                try {
+                    controller.stop();
+                } catch (IOException e) {
+                    Log.err("Failed to finish replay before the world was reset", e);
+                }
+                return;
+            }
+            controller.stopPlaybackForWorldReset();
         });
 
         Events.run(Trigger.beforeGameUpdate, controller::applyPlaybackRandomState);
@@ -175,5 +193,3 @@ public class ReplayMod extends Mod {
         return Vars.dataDirectory.child("replays");
     }
 }
-
-

@@ -42,5 +42,3 @@ public class RecordMobileInput extends MobileInput implements AutoCloseable {
         recorder.close();
     }
 }
-
-

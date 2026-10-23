@@ -64,5 +64,3 @@ class RepReaderRandomStateTests {
         assertThrows(IOException.class, () -> RepReader.decodeRandomRecord(3L, zeroState));
     }
 }
-
-

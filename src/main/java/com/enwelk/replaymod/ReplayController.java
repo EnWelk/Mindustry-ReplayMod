@@ -1,12 +1,15 @@
 package com.enwelk.replaymod;
 
 import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
 import java.io.IOException;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.function.Consumer;
 
 import com.enwelk.replaymod.input.RecordDesktopInput;
@@ -21,6 +24,7 @@ import arc.math.Mathf;
 import arc.math.geom.Vec2;
 import arc.util.Log;
 import arc.util.Time;
+import arc.util.io.FastDeflaterOutputStream;
 import arc.util.io.Reads;
 import arc.util.serialization.Jval;
 import mindustry.Vars;
@@ -37,12 +41,22 @@ import mindustry.input.DesktopInput;
 import mindustry.input.InputHandler;
 import mindustry.input.MobileInput;
 import mindustry.input.PlaceMode;
+import mindustry.io.SaveIO;
+import mindustry.io.SaveOptions;
 import mindustry.io.TypeIO;
+import mindustry.type.Sector;
 import mindustry.world.Block;
 import mindustry.world.Tile;
 
 public class ReplayController {
     private static final long MAX_SEEK_STEP = 300L;
+    private static final long SEEK_FRAME_BUDGET_NANOS = 8_000_000L;
+    private static final long FINE_SNAPSHOT_INTERVAL_TICKS = 5L * 60L;
+    private static final long COARSE_SNAPSHOT_INTERVAL_TICKS = 60L * 60L;
+    private static final int MAX_FINE_SNAPSHOTS = 20;
+    private static final long MAX_SNAPSHOT_BUDGET_BYTES = 768L * 1024L * 1024L;
+    private static final long MIN_SNAPSHOT_CAPTURE_INTERVAL_NANOS = 1_000_000_000L;
+    private static final long SNAPSHOT_HEADROOM_BYTES = 64L * 1024L * 1024L;
 
     private static Method extendedAim = findExtendedAim();
 
@@ -83,6 +97,15 @@ public class ReplayController {
     private long playbackOrigin;
     private long durationTicks;
     private long seekTarget = -1L;
+    private final ArrayDeque<MapSnapshot> fineSnapshots = new ArrayDeque<>();
+    private final ArrayList<MapSnapshot> coarseSnapshots = new ArrayList<>();
+    private long snapshotBytes;
+    private long snapshotBudget;
+    private long lastSnapshotSize;
+    private long nextSnapshotTick = FINE_SNAPSHOT_INTERVAL_TICKS;
+    private long nextCoarseSnapshotTick = COARSE_SNAPSHOT_INTERVAL_TICKS;
+    private long lastSnapshotCaptureNanos;
+    private boolean loadingReplayWorld;
     private boolean playbackPaused;
     private boolean pauseAfterSeek;
     private boolean playbackVelocitySemantics;
@@ -222,6 +245,26 @@ public class ReplayController {
         }
     }
 
+    /**
+     * Stops playback when the game world is reset by something other than the replay itself.
+     * <p>
+     * Not every world change fires a {@code PlayEvent}: exiting to the menu, opening the map
+     * editor, and joining a server only fire {@code ResetEvent}. Without this hook the viewer
+     * input handler, the replay time scale and the disabled Next Wave keybind would leak into
+     * the next world, which left the game frozen after the switch.
+     * <p>
+     * Resets triggered while playback loads its own world (starting, restarting, or restoring a
+     * snapshot) are ignored so the replay survives them.
+     */
+    void stopPlaybackForWorldReset() {
+        if (reader == null || loadingReplayWorld) return;
+        try {
+            stopPlayback();
+        } catch (IOException | RuntimeException | LinkageError e) {
+            Log.err("Failed to stop replay before the world was reset", e);
+        }
+    }
+
     /** Sets the simulation multiplier used while playback is running. */
     public void setPlaybackSpeed(int speed) {
         if (speed != 1 && speed != 2 && speed != 3 && speed != 5 && speed != 10) {
@@ -230,7 +273,7 @@ public class ReplayController {
         playbackSpeed = speed;
     }
 
-    /** Requests a seek; backward seeks restore the embedded map before simulating forward. */
+    /** Requests a seek; backward seeks restore the nearest in-memory snapshot before simulating forward. */
     public void seek(long targetTick) {
         if (reader == null) return;
         long target = Math.max(0L, Math.min(targetTick, durationTicks));
@@ -239,11 +282,13 @@ public class ReplayController {
         }
         if (target == currentTick && seekTarget < 0L) return;
         if (target < currentTick) {
-            try {
-                restartPlayback();
-            } catch (IOException | RuntimeException | LinkageError e) {
-                failPlayback("Could not restart replay for backward seek", e);
-                return;
+            if (!restoreSnapshotAt(target)) {
+                try {
+                    restartPlayback();
+                } catch (IOException | RuntimeException | LinkageError e) {
+                    failPlayback("Could not restart replay for backward seek", e);
+                    return;
+                }
             }
             if (reader == null) return;
         }
@@ -258,13 +303,17 @@ public class ReplayController {
     void advanceSeek() {
         if (reader == null || seekTarget < 0L || Vars.state == null) return;
         long target = seekTarget;
+        long deadline = System.nanoTime() + SEEK_FRAME_BUDGET_NANOS;
         try {
-            long replayTick = playbackOrigin + currentTick;
-            if (nextRecord != null && nextRecord.tick() <= replayTick) {
-                updatePlayback();
-            }
-            if (reader != null && currentTick < target) {
-                replayTick = playbackOrigin + currentTick;
+            // Loop several one-tick updates per frame. This keeps the UI responsive while
+            // finishing seeks far faster than one simulation tick per rendered frame.
+            while (reader != null && currentTick < target && System.nanoTime() < deadline) {
+                long replayTick = playbackOrigin + currentTick;
+                if (nextRecord != null && nextRecord.tick() <= replayTick) {
+                    updatePlayback();
+                    if (reader == null) return;
+                    continue;
+                }
                 long step = Math.min(MAX_SEEK_STEP, target - currentTick);
                 if (nextRecord != null) {
                     long untilRecord = nextRecord.tick() - replayTick;
@@ -272,6 +321,7 @@ public class ReplayController {
                         step = Math.min(step, untilRecord);
                     }
                 }
+                if (step <= 0L) break;
                 double before = Vars.state.tick;
                 long simulationStep = Math.max(1L, step);
                 Time.setDeltaProvider(() -> simulationStep);
@@ -312,6 +362,7 @@ public class ReplayController {
             }
         }
         updatePlayback();
+        updateSnapshots();
     }
 
     /** Returns whether playback or the game state is paused. */
@@ -336,6 +387,7 @@ public class ReplayController {
     /** Reloads the embedded save and starts the current replay from its first record. */
     public void restartFromBeginning() throws IOException {
         if (reader == null) return;
+        dropSnapshotData();
         restartPlayback();
         seekTarget = -1L;
         playbackPaused = false;
@@ -353,8 +405,9 @@ public class ReplayController {
             throw new IllegalStateException("Replay playback requires a loaded client");
         }
 
+        startSnapshotSession();
         InputHandler input = Vars.control.input;
-        RepReader newReader = new RepReader(path);
+        RepReader newReader = openEmbeddedWorld(path);
         try {
             newReader.scanTimeline();
             restoreReplayRandomState(newReader);
@@ -395,6 +448,7 @@ public class ReplayController {
             seekTarget = -1L;
             previousInput = null;
             playbackPath = null;
+            clearSnapshots();
             if (previousSkipWaveBinding != null) {
                 Binding.skipWave.value = previousSkipWaveBinding;
                 previousSkipWaveBinding = null;
@@ -725,6 +779,7 @@ public class ReplayController {
         } finally {
             previousInput = null;
             playbackPath = null;
+            clearSnapshots();
             try {
                 if (previousSkipWaveBinding != null) {
                     Binding.skipWave.value = previousSkipWaveBinding;
@@ -743,19 +798,20 @@ public class ReplayController {
     /** Reloads the embedded save and resets playback before simulating forward. */
     private void restartPlayback() throws IOException {
         if (playbackPath == null) throw new IOException("Replay path is unavailable");
-        RepReader restarted = new RepReader(playbackPath);
+        RepReader restarted = openEmbeddedWorld(playbackPath);
         try {
-            restarted.scanTimeline();
             restoreReplayRandomState(restarted);
             RepReader oldReader = reader;
             reader = restarted;
             playbackVelocitySemantics = restarted.velocityRecorded();
-            playbackOrigin = restarted.firstTick();
-            durationTicks = Math.max(0L, restarted.endTick() - playbackOrigin);
+            // The timeline was already scanned when playback started and the file has not
+            // changed, so reusing playbackOrigin/durationTicks skips a full pass over the
+            // replay. Deep backward seeks restart much faster without that rescan.
             nextRecord = restarted.readNext();
             lastTick = null;
             lastRandomState = null;
             currentTick = 0L;
+            resetSnapshotSchedule();
             Vars.state.tick = 0d;
             Vars.state.set(GameState.State.playing);
             if (Vars.control.input != playbackInput) Vars.control.setInput(playbackInput);
@@ -769,6 +825,287 @@ public class ReplayController {
             }
             throw e;
         }
+    }
+
+    /**
+     * Opens a replay file whose constructor loads the embedded save into the current world.
+     * Loading a save always resets the game world; the guard flag keeps the {@code ResetEvent}
+     * hook from treating this replay-managed world switch as an external one.
+     */
+    private RepReader openEmbeddedWorld(Path path) throws IOException {
+        loadingReplayWorld = true;
+        try {
+            return new RepReader(path);
+        } finally {
+            loadingReplayWorld = false;
+        }
+    }
+
+    /** Captures periodic in-memory snapshots used to accelerate backward seeks. */
+    private void updateSnapshots() {
+        if (reader == null || Vars.state == null || !Vars.state.isGame() || snapshotBudget <= 0L) return;
+        long tick = currentTick;
+        if (tick < nextSnapshotTick) return;
+        long now = System.nanoTime();
+        if (now - lastSnapshotCaptureNanos < MIN_SNAPSHOT_CAPTURE_INTERVAL_NANOS) return;
+
+        boolean coarse = tick >= nextCoarseSnapshotTick;
+        nextSnapshotTick = nextIntervalTick(tick, FINE_SNAPSHOT_INTERVAL_TICKS);
+        if (coarse) {
+            nextCoarseSnapshotTick = nextIntervalTick(tick, COARSE_SNAPSHOT_INTERVAL_TICKS);
+        }
+        lastSnapshotCaptureNanos = now;
+
+        MapSnapshot existing = findSnapshotAt(tick);
+        if (existing != null) {
+            if (coarse) retainAsCoarse(existing);
+            return;
+        }
+        captureSnapshot(coarse);
+    }
+
+    private static long nextIntervalTick(long tick, long interval) {
+        return tick - tick % interval + interval;
+    }
+
+    /** Serializes the current world into a compressed in-memory save without embedding assets. */
+    private void captureSnapshot(boolean coarse) {
+        if (reader == null || Vars.state == null || !Vars.state.isGame() || Vars.player == null) return;
+        if (!hasSnapshotHeadroom()) return;
+        try {
+            ByteArrayOutputStream output = new ByteArrayOutputStream(256 * 1024);
+            SaveOptions options = new SaveOptions();
+            options.embedAssets = false;
+            // SaveIO.write persists live campaign sector metadata (sector.saveInfo()) whenever
+            // state.rules.sector is set. Detach the sector for the write so snapshot capture can
+            // never modify the player's real campaign progress while a replay is running.
+            Sector detachedSector = Vars.state.rules.sector;
+            Vars.state.rules.sector = null;
+            try {
+                SaveIO.write(new FastDeflaterOutputStream(output), options);
+            } finally {
+                Vars.state.rules.sector = detachedSector;
+            }
+
+            MapSnapshot snapshot = new MapSnapshot(
+                currentTick,
+                Vars.state.tick,
+                output.toByteArray(),
+                reader.cursor(),
+                lastTick,
+                lastRandomState,
+                playbackInput != null && playbackInput.isBuilding,
+                playbackInput == null ? PlaceMode.none : playbackInput.mode
+            );
+            addSnapshot(snapshot, coarse);
+        } catch (RuntimeException | LinkageError e) {
+            if (isOutOfMemory(e)) {
+                Log.err("ReplayMod: not enough memory for replay snapshots; disabling them for this playback");
+                clearSnapshots();
+            } else {
+                Log.err("ReplayMod: could not capture a replay snapshot", e);
+            }
+        } catch (OutOfMemoryError e) {
+            Log.err("ReplayMod: not enough memory for replay snapshots; disabling them for this playback");
+            clearSnapshots();
+        }
+    }
+
+    private boolean hasSnapshotHeadroom() {
+        long max = Runtime.getRuntime().maxMemory();
+        long used = Runtime.getRuntime().totalMemory() - Runtime.getRuntime().freeMemory();
+        long headroom = max - used;
+        long needed = Math.max(SNAPSHOT_HEADROOM_BYTES, lastSnapshotSize * 2L);
+        return headroom > needed;
+    }
+
+    private static boolean isOutOfMemory(Throwable error) {
+        for (Throwable current = error; current != null; current = current.getCause()) {
+            if (current instanceof OutOfMemoryError) return true;
+        }
+        return false;
+    }
+
+    private void addSnapshot(MapSnapshot snapshot, boolean coarse) {
+        snapshot.inFine = true;
+        fineSnapshots.addLast(snapshot);
+        snapshotBytes += snapshot.save.length;
+        lastSnapshotSize = snapshot.save.length;
+        if (coarse) {
+            snapshot.inCoarse = true;
+            coarseSnapshots.add(snapshot);
+        }
+
+        while (fineSnapshots.size() > MAX_FINE_SNAPSHOTS) {
+            removeFromFine(fineSnapshots.removeFirst());
+        }
+        evictSnapshots();
+    }
+
+    private void retainAsCoarse(MapSnapshot snapshot) {
+        if (snapshot.inCoarse || snapshot.save == null) return;
+        snapshot.inCoarse = true;
+        coarseSnapshots.add(snapshot);
+        evictSnapshots();
+    }
+
+    private void evictSnapshots() {
+        while (snapshotBytes > snapshotBudget) {
+            if (!coarseSnapshots.isEmpty()) {
+                removeFromCoarse(coarseSnapshots.remove(0));
+            } else if (!fineSnapshots.isEmpty()) {
+                removeFromFine(fineSnapshots.removeFirst());
+            } else {
+                break;
+            }
+        }
+    }
+
+    private void removeFromFine(MapSnapshot snapshot) {
+        snapshot.inFine = false;
+        releaseIfUnused(snapshot);
+    }
+
+    private void removeFromCoarse(MapSnapshot snapshot) {
+        snapshot.inCoarse = false;
+        releaseIfUnused(snapshot);
+    }
+
+    private void releaseIfUnused(MapSnapshot snapshot) {
+        if (snapshot.inFine || snapshot.inCoarse || snapshot.save == null) return;
+        long size = snapshot.save.length;
+        snapshot.save = null;
+        snapshotBytes = Math.max(0L, snapshotBytes - size);
+    }
+
+    private MapSnapshot findSnapshot(long target) {
+        MapSnapshot best = null;
+        for (MapSnapshot snapshot : fineSnapshots) {
+            if (snapshot.save != null && snapshot.tick <= target &&
+                (best == null || snapshot.tick > best.tick)) {
+                best = snapshot;
+            }
+        }
+        for (MapSnapshot snapshot : coarseSnapshots) {
+            if (snapshot.save != null && snapshot.tick <= target &&
+                (best == null || snapshot.tick > best.tick)) {
+                best = snapshot;
+            }
+        }
+        return best;
+    }
+
+    private MapSnapshot findSnapshotAt(long tick) {
+        for (MapSnapshot snapshot : fineSnapshots) {
+            if (snapshot.tick == tick) return snapshot;
+        }
+        for (MapSnapshot snapshot : coarseSnapshots) {
+            if (snapshot.tick == tick) return snapshot;
+        }
+        return null;
+    }
+
+    /** Restores the closest snapshot at or before the target, if one is cached. */
+    private boolean restoreSnapshotAt(long target) {
+        MapSnapshot snapshot = findSnapshot(target);
+        if (snapshot == null) return false;
+        try {
+            restoreSnapshot(snapshot);
+            return true;
+        } catch (IOException | RuntimeException | LinkageError e) {
+            Log.err("ReplayMod: could not restore a replay snapshot", e);
+            clearSnapshots();
+            return false;
+        } catch (OutOfMemoryError e) {
+            Log.err("ReplayMod: not enough memory to restore a replay snapshot");
+            clearSnapshots();
+            return false;
+        }
+    }
+
+    private void restoreSnapshot(MapSnapshot snapshot) throws IOException {
+        if (reader == null || Vars.world == null || snapshot.save == null) {
+            throw new IOException("Replay snapshot is unavailable");
+        }
+
+        float cameraX = 0f;
+        float cameraY = 0f;
+        boolean hadCamera = Core.camera != null;
+        if (hadCamera) {
+            cameraX = Core.camera.position.x;
+            cameraY = Core.camera.position.y;
+        }
+
+        // SaveIO.load resets the world before reading the snapshot; the guard flag keeps the
+        // ResetEvent hook from stopping the very playback that is restoring its own snapshot.
+        loadingReplayWorld = true;
+        try {
+            SaveIO.load(new ByteArrayInputStream(snapshot.save), Vars.world.context);
+        } finally {
+            loadingReplayWorld = false;
+        }
+        if (Vars.state == null || Vars.world == null) {
+            throw new IOException("Replay snapshot did not restore a game world");
+        }
+
+        reader.resetTo(snapshot.cursor);
+        nextRecord = reader.readNext();
+        lastTick = snapshot.lastTick;
+        lastRandomState = snapshot.lastRandomState;
+        playbackVelocitySemantics = reader.velocityRecorded();
+        currentTick = snapshot.tick;
+        Vars.state.tick = snapshot.stateTick;
+        if (lastRandomState != null) {
+            Mathf.rand.setState(lastRandomState.seed0(), lastRandomState.seed1());
+        } else {
+            restoreReplayRandomState(reader);
+        }
+        if (playbackInput != null) {
+            playbackInput.isBuilding = snapshot.isBuilding;
+            playbackInput.mode = snapshot.mode;
+        }
+        Vars.state.set(GameState.State.playing);
+        if (Vars.control != null && playbackInput != null && Vars.control.input != playbackInput) {
+            Vars.control.setInput(playbackInput);
+        }
+        if (hadCamera && Core.camera != null) {
+            Core.camera.position.set(cameraX, cameraY);
+        }
+        scheduleSnapshotsAfter(currentTick);
+    }
+
+    private void startSnapshotSession() {
+        dropSnapshotData();
+        long max = Runtime.getRuntime().maxMemory();
+        snapshotBudget = max <= 0L || max == Long.MAX_VALUE
+            ? 512L * 1024L * 1024L
+            : Math.min(MAX_SNAPSHOT_BUDGET_BYTES, max / 3L);
+        resetSnapshotSchedule();
+    }
+
+    private void dropSnapshotData() {
+        fineSnapshots.clear();
+        coarseSnapshots.clear();
+        snapshotBytes = 0L;
+        lastSnapshotSize = 0L;
+    }
+
+    private void resetSnapshotSchedule() {
+        nextSnapshotTick = FINE_SNAPSHOT_INTERVAL_TICKS;
+        nextCoarseSnapshotTick = COARSE_SNAPSHOT_INTERVAL_TICKS;
+        lastSnapshotCaptureNanos = 0L;
+    }
+
+    private void scheduleSnapshotsAfter(long tick) {
+        nextSnapshotTick = nextIntervalTick(tick, FINE_SNAPSHOT_INTERVAL_TICKS);
+        nextCoarseSnapshotTick = nextIntervalTick(tick, COARSE_SNAPSHOT_INTERVAL_TICKS);
+        lastSnapshotCaptureNanos = 0L;
+    }
+
+    private void clearSnapshots() {
+        dropSnapshotData();
+        snapshotBudget = 0L;
+        resetSnapshotSchedule();
     }
 
     /** Applies the standard client delta with the selected replay multiplier. */
@@ -815,6 +1152,33 @@ public class ReplayController {
         playbackError.accept(message);
     }
 
+    /** Immutable in-memory replay state captured for fast backward seeks. */
+    private static final class MapSnapshot {
+        final long tick;
+        final double stateTick;
+        final RepReader.Cursor cursor;
+        final RepReader.TickRecord lastTick;
+        final RepReader.RandomRecord lastRandomState;
+        final boolean isBuilding;
+        final PlaceMode mode;
+        byte[] save;
+        boolean inFine;
+        boolean inCoarse;
+
+        MapSnapshot(long tick, double stateTick, byte[] save, RepReader.Cursor cursor,
+                    RepReader.TickRecord lastTick, RepReader.RandomRecord lastRandomState,
+                    boolean isBuilding, PlaceMode mode) {
+            this.tick = tick;
+            this.stateTick = stateTick;
+            this.save = save;
+            this.cursor = cursor;
+            this.lastTick = lastTick;
+            this.lastRandomState = lastRandomState;
+            this.isBuilding = isBuilding;
+            this.mode = mode;
+        }
+    }
+
     /** Rejects a new replay operation while another session is active. */
     private void ensureIdle() {
         if (recordingInput != null || reader != null) {
@@ -823,5 +1187,3 @@ public class ReplayController {
     }
 
 }
-
-

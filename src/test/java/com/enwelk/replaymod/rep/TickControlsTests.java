@@ -29,5 +29,3 @@ class TickControlsTests {
         assertThrows(IOException.class, () -> TickControls.decode(0x20000000));
     }
 }
-
-
